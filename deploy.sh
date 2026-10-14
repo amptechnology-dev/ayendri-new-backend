@@ -3,9 +3,9 @@ set -e
 
 cd "$(dirname "$0")"
 
-DOMAIN="estorebackend.amptechnology.in"
+DOMAIN="backend.ayendri.com"
 EMAIL="devs.amptechnology@gmail.com"
-CONTAINER="estore-app"
+CONTAINER="ayendri-app"
 APP_PORT="8090"
 CERT_PATH="/root/amp_portal_backend/certbot/conf/live/$DOMAIN/fullchain.pem"
 NGINX_CONF="/root/amp_portal_backend/nginx/conf.d/$DOMAIN.conf"
@@ -51,9 +51,6 @@ wait_for_network() {
 if test -f "$CERT_PATH"; then
   echo "Certificate already exists - skipping SSL generation."
 
-  git pull --ff-only || echo "git pull skipped"
-
-  docker compose down || true
   docker compose pull
   docker compose up -d --remove-orphans
 
@@ -127,7 +124,6 @@ echo "Certificate obtained successfully!"
 
 # ── Step 3: Start app FIRST (nginx needs the upstream host to resolve) ──
 echo "Starting $CONTAINER..."
-docker compose down || true
 docker compose pull
 docker compose up -d --remove-orphans
 
