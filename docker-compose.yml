@@ -1,0 +1,23 @@
+services:
+  app:
+    container_name: estore-app
+    image: ghcr.io/amptechnology-dev/store_product_backend:latest
+    env_file:
+      - .env
+    environment:
+      - CHROME_PATH=/usr/bin/chromium
+    expose:
+      - '8090'
+    networks:
+      - shared-nginx-net
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+networks:
+  shared-nginx-net:
+    external: true
+    name: amp_portal_backend_app-network

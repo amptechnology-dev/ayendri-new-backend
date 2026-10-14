@@ -1,0 +1,44 @@
+# Dependencies
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
+logs
+
+# Git
+.git
+.gitignore
+.gitattributes
+.github
+
+# Editor / OS files
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# Docker / deploy files
+Dockerfile
+docker-compose.yml
+.dockerignore
+deploy.sh
+
+# Docs
+*.md
+
+nginx/
+certbot/
+
+IN.zip
+pincodes.csv
+geonames/
+
+# Test / coverage
+coverage
+.nyc_output

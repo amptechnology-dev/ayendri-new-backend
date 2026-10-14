@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sales Invoice - <%= sale.invoiceNumber %>
+    </title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        .invoice-container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Header Section */
+        .invoice-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 40px;
+            padding-bottom: 20px;
+            border-bottom: 3px solid #16a34a;
+        }
+
+        .company-info {
+            flex: 1;
+        }
+
+        .company-name {
+            font-size: 28px;
+            font-weight: bold;
+            color: #16a34a;
+            margin-bottom: 5px;
+        }
+
+        .company-tagline {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 15px;
+        }
+
+        .company-details {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.8;
+        }
+
+        .invoice-title-section {
+            text-align: right;
+        }
+
+        .invoice-title {
+            font-size: 32px;
+            font-weight: bold;
+            color: #1e293b;
+            margin-bottom: 10px;
+        }
+
+        .invoice-number {
+            font-size: 16px;
+            color: #16a34a;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .invoice-date {
+            font-size: 13px;
+            color: #666;
+        }
+
+        /* Info Section */
+        .info-section {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+            gap: 30px;
+        }
+
+        .info-box {
+            flex: 1;
+            padding: 20px;
+            border-radius: 8px;
+            background: #f0fdf4;
+            border-left: 4px solid #16a34a;
+        }
+
+        .info-box h3 {
+            font-size: 14px;
+            color: #16a34a;
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .info-box p {
+            font-size: 13px;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .info-box strong {
+            color: #1e293b;
+            font-weight: 600;
+        }
+
+        /* Payment Status Badge */
+        .payment-status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        .status-paid {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .status-partial {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-unpaid {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        /* Items Table */
+        .items-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+        }
+
+        .items-table thead {
+            background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+            color: white;
+        }
+
+        .items-table th {
+            padding: 12px 10px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .items-table th:last-child,
+        .items-table td:last-child {
+            text-align: right;
+        }
+
+        .items-table tbody tr {
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .items-table tbody tr:hover {
+            background: #f9fafb;
+        }
+
+        .items-table td {
+            padding: 12px 10px;
+            font-size: 13px;
+            color: #333;
+        }
+
+        .product-name {
+            font-weight: 600;
+            color: #1e293b;
+        }
+
+        .product-info {
+            font-size: 11px;
+            color: #6b7280;
+            margin-top: 2px;
+        }
+
+        /* Summary Section */
+        .summary-section {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 30px;
+        }
+
+        .summary-box {
+            width: 350px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 20px;
+            font-size: 14px;
+        }
+
+        .summary-row:not(:last-child) {
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .summary-row.subtotal {
+            background: #f9fafb;
+        }
+
+        .summary-row.total {
+            background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+            color: white;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .summary-row.paid {
+            background: #dcfce7;
+            color: #166534;
+            font-weight: 600;
+        }
+
+        .summary-row.due {
+            background: #fee2e2;
+            color: #991b1b;
+            font-weight: 600;
+        }
+
+        /* Footer */
+        .invoice-footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 2px solid #e5e7eb;
+        }
+
+        .notes-section {
+            margin-bottom: 20px;
+        }
+
+        .notes-section h4 {
+            font-size: 13px;
+            color: #16a34a;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+        }
+
+        .notes-section p {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.6;
+        }
+
+        .signature-section {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 50px;
+        }
+
+        .signature-box {
+            text-align: center;
+        }
+
+        .signature-line {
+            width: 200px;
+            border-top: 2px solid #333;
+            margin-top: 60px;
+            padding-top: 10px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .footer-text {
+            text-align: center;
+            font-size: 11px;
+            color: #999;
+            margin-top: 30px;
+        }
+
+        /* Utility Classes */
+        .text-right {
+            text-align: right;
+        }
+
+        .text-center {
+            text-align: center;
+        }
+
+        .font-bold {
+            font-weight: 600;
+        }
+
+        .nozzle-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            background: #dbeafe;
+            color: #1e40af;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="invoice-container">
+        <!-- Header -->
+        <div class="invoice-header">
+            <div class="company-info">
+                <div class="company-name">Petrol Pump Operations</div>
+                <div class="company-tagline">Fuel Your Journey</div>
+            </div>
+            <div class="invoice-title-section">
+                <div class="invoice-title">SALES INVOICE</div>
+                <div class="invoice-number">Invoice #<%= sale.invoiceNumber %>
+                </div>
+                <div class="invoice-date">
+                    <strong>Date:</strong>
+                    <%= sale.createdAt ? new Date(sale.createdAt).toLocaleDateString('en-IN', { day: '2-digit' ,
+                        month: 'short' , year: 'numeric' }) : new Date().toLocaleDateString('en-IN', { day: '2-digit' ,
+                        month: 'short' , year: 'numeric' }) %>
+                </div>
+                <% if (sale.createdAt) { %>
+                    <div class="invoice-date">
+                        <strong>Time:</strong>
+                        <%= new Date(sale.createdAt).toLocaleTimeString('en-IN', { hour: '2-digit' , minute: '2-digit'
+                            }) %>
+                    </div>
+                    <% } %>
+            </div>
+        </div>
+
+        <!-- Info Section -->
+        <div class="info-section">
+            <div class="info-box">
+                <h3>Worker Information</h3>
+                <% if (sale.worker) { %>
+                    <p><strong>Worker Name:</strong>
+                        <%= sale.worker.name || 'N/A' %>
+                    </p>
+                    <% if (sale.worker.phone) { %>
+                        <p><strong>Phone:</strong>
+                            <%= sale.worker.phone %>
+                        </p>
+                        <% } %>
+                            <% if (sale.worker.workerType) { %>
+                                <p><strong>Type:</strong>
+                                    <%= sale.worker.workerType %>
+                                </p>
+                                <% } %>
+                                    <% } else { %>
+                                        <p><strong>Worker:</strong> N/A</p>
+                                        <% } %>
+            </div>
+
+            <div class="info-box">
+                <h3>Shift Information</h3>
+                <% if (sale.shiftStart && sale.shiftEnd) { %>
+                    <p><strong>Shift Start:</strong>
+                        <%= new Date(sale.shiftStart).toLocaleString('en-IN', { hour: '2-digit' , minute: '2-digit' ,
+                            day: '2-digit' , month: 'short' }) %>
+                    </p>
+                    <p><strong>Shift End:</strong>
+                        <%= new Date(sale.shiftEnd).toLocaleString('en-IN', { hour: '2-digit' , minute: '2-digit' ,
+                            day: '2-digit' , month: 'short' }) %>
+                    </p>
+                    <% } else if (sale.shiftStart) { %>
+                        <p><strong>Shift Start:</strong>
+                            <%= new Date(sale.shiftStart).toLocaleString('en-IN', { hour: '2-digit' , minute: '2-digit'
+                                , day: '2-digit' , month: 'short' }) %>
+                        </p>
+                        <p><strong>Status:</strong> <span class="payment-status status-partial">In Progress</span></p>
+                        <% } else { %>
+                            <p><strong>Shift:</strong> N/A</p>
+                            <% } %>
+                                <% if (sale.workerTotalSale) { %>
+                                    <p><strong>Worker Total Sale:</strong> <span
+                                            style="color: #16a34a; font-weight: 600;">₹<%=
+                                                sale.workerTotalSale.toFixed(2) %></span></p>
+                                    <% } %>
+            </div>
+        </div>
+
+        <!-- Items Table -->
+        <table class="items-table">
+            <thead>
+                <tr>
+                    <th style="width: 5%;">#</th>
+                    <th style="width: 30%;">Product Details</th>
+                    <th style="width: 12%;">Quantity</th>
+                    <th style="width: 12%;">Unit</th>
+                    <th style="width: 13%;">Rate</th>
+                    <th style="width: 15%;">Unit Price</th>
+                    <th style="width: 13%;">Amount</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% if (sale.items && sale.items.length> 0) { %>
+                    <% sale.items.forEach((item, index)=> { %>
+                        <% 
+                            // Determine if product is fuel-based or accessory
+                            const productType = (item.productType || '').toUpperCase();
+                            const isFuelProduct = productType === 'FUEL' || (item.litres && item.litres > 0);
+                            
+                            // Calculate litres for fuel products (litres field or qty field might contain litre value)
+                            const litresValue = item.litres || (isFuelProduct ? item.qty : 0);
+                            
+                            // Display unit based on product type
+                            const unitDisplay = isFuelProduct ? `${(litresValue || 0).toFixed(2)} L` : (item.unit || 'Pcs');
+                            
+                            // Display rate based on product type
+                            const rateDisplay = isFuelProduct ? `₹${(item.pricePerLitre || item.price || 0).toFixed(2)}/L` : `₹${(item.price || 0).toFixed(2)}`;
+                        %>
+                        <tr>
+                            <td>
+                                <%= index + 1 %>
+                            </td>
+                            <td>
+                                <div class="product-name">
+                                    <%= item.productName || 'N/A' %>
+                                </div>
+                                <div class="product-info">
+                                    <%= item.productType || '' %>
+                                        <% if (item.nozzleNumber) { %>
+                                            <span class="nozzle-badge">Nozzle #<%= item.nozzleNumber %></span>
+                                            <% } %>
+                                </div>
+                            </td>
+                            <td>
+                                <%= item.qty || 0 %>
+                            </td>
+                            <td>
+                                <%= unitDisplay %>
+                            </td>
+                            <td><%= rateDisplay %>
+                            </td>
+                            <td>₹<%= (item.price || 0).toFixed(2) %>
+                            </td>
+                            <td class="font-bold">₹<%= (item.amount || 0).toFixed(2) %>
+                            </td>
+                        </tr>
+                        <% }); %>
+                            <% } else { %>
+                                <tr>
+                                    <td colspan="7" class="text-center">No items found</td>
+                                </tr>
+                                <% } %>
+            </tbody>
+        </table>
+
+        <!-- Summary Section -->
+        <div class="summary-section">
+            <div class="summary-box">
+                <div class="summary-row subtotal">
+                    <span>Total Items</span>
+                    <span>
+                        <%= sale.items?.length || 0 %>
+                    </span>
+                </div>
+                <div class="summary-row subtotal">
+                    <span>Total Quantity</span>
+                    <span>
+                        <%= (sale.items?.reduce((sum, item)=> sum + (item.qty || 0), 0) || 0) %>
+                    </span>
+                </div>
+                <% 
+                    // Calculate total litres from fuel items only
+                    const totalLitres = sale.items?.reduce((sum, item) => {
+                        const productType = (item.productType || '').toUpperCase();
+                        const isFuel = productType === 'FUEL' || (item.litres && item.litres > 0);
+                        if (isFuel) {
+                            return sum + (item.litres || item.qty || 0);
+                        }
+                        return sum;
+                    }, 0) || 0;
+                    
+                    if (totalLitres > 0) { 
+                %>
+                <div class="summary-row subtotal">
+                    <span>Total Litres</span>
+                    <span>
+                        <%= totalLitres.toFixed(2) %> L
+                    </span>
+                </div>
+                <% } %>
+                <div class="summary-row total">
+                    <span>TOTAL AMOUNT</span>
+                    <span>₹<%= (sale.workerTotalSale || 0).toFixed(2) %></span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="invoice-footer">
+            <div class="signature-section">
+                <div class="signature-box">
+                    <div class="signature-line">Authorized Signature</div>
+                </div>
+                <div class="signature-box">
+                    <div class="signature-line">Customer Signature</div>
+                </div>
+            </div>
+
+            <div class="footer-text">
+                <p>Thank you for choosing our services!</p>
+                <p>Drive Safe, Fuel Smart</p>
+                <p>Generated on <%= new Date().toLocaleDateString('en-IN', { day: '2-digit' , month: 'short' ,
+                        year: 'numeric' , hour: '2-digit' , minute: '2-digit' }) %>
+                </p>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

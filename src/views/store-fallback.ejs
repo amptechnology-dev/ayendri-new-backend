@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title><%= store.storeName %></title>
+    <meta property="og:title" content="<%= store.storeName %>" />
+    <meta property="og:description" content="Open <%= store.storeName %> in the Eshop app" />
+    <% if (store.images && store.images[0]) { %>
+    <meta property="og:image" content="<%= store.images[0] %>" />
+    <% } %>
+    <style>
+      body { font-family: sans-serif; text-align: center; padding: 40px 20px; margin: 0; }
+      img.cover { width: 120px; height: 120px; object-fit: cover; border-radius: 16px; }
+      .type { color: #666; margin: 4px 0 28px; }
+      .btn { display: block; max-width: 320px; margin: 12px auto; padding: 14px 20px;
+             border-radius: 10px; font-size: 16px; font-weight: 600; text-decoration: none; }
+      .primary { background: #111; color: #fff; }
+      .secondary { background: #fff; color: #111; border: 1.5px solid #111; }
+      .note { color: #666; font-size: 13px; max-width: 320px; margin: 20px auto 0; }
+    </style>
+  </head>
+  <body>
+    <% if (store.images && store.images[0]) { %>
+    <img class="cover" src="<%= store.images[0] %>" alt="<%= store.storeName %>" />
+    <% } %>
+    <h2><%= store.storeName %></h2>
+    <p class="type"><%= store.storeType %></p>
+
+    <% if (isAndroid) { %>
+      <a class="btn primary" href="<%= intentUrl %>">Open in App</a>
+      <% if (apkUrl) { %>
+      <a id="dl" class="btn secondary" href="<%= apkUrl %>">Download App</a>
+      <p class="note">
+        If the app is installed, tap "Open in App". If not, tap "Download App" to
+        install it, and this store will open automatically once you open the app.
+      </p>
+      <% } %>
+    <% } else { %>
+      <p style="color:#666">Open this link on an Android phone with the Eshop app installed.</p>
+    <% } %>
+
+    <% if (installToken) { %>
+    <script>
+      (function () {
+        var token = "<%= installToken %>";
+        var btn = document.getElementById("dl");
+        if (!btn) return;
+        btn.addEventListener("click", function () {
+          var text = "ESHOP-INSTALL:" + token;
+          try {
+            var ta = document.createElement("textarea");
+            ta.value = text;
+            ta.setAttribute("readonly", "");
+            ta.style.position = "fixed";
+            ta.style.opacity = "0";
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand("copy");
+            document.body.removeChild(ta);
+          } catch (e) {}
+          if (navigator.clipboard) {
+            navigator.clipboard.writeText(text).catch(function () {});
+          }
+        });
+      })();
+    </script>
+    <% } %>
+  </body>
+</html>

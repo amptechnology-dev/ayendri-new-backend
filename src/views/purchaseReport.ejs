@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Purchase Report</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #333;
+            line-height: 1.6;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+
+        .report-container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+        }
+
+        /* Header Section */
+        .report-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 40px;
+            padding-bottom: 20px;
+            border-bottom: 3px solid #2563eb;
+        }
+
+        .company-info {
+            flex: 1;
+        }
+
+        .company-name {
+            font-size: 28px;
+            font-weight: bold;
+            color: #2563eb;
+            margin-bottom: 5px;
+        }
+
+        .company-tagline {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 15px;
+        }
+
+        .company-details {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.8;
+        }
+
+        .report-title-section {
+            text-align: right;
+        }
+
+        .report-title {
+            font-size: 32px;
+            font-weight: bold;
+            color: #1e293b;
+            margin-bottom: 10px;
+        }
+
+        .report-subtitle {
+            font-size: 16px;
+            color: #2563eb;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+
+        .report-date {
+            font-size: 13px;
+            color: #666;
+        }
+
+        /* Filter/Info Section */
+        .filter-section {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 30px;
+            gap: 30px;
+        }
+
+        .filter-box {
+            flex: 1;
+            padding: 15px;
+            border-radius: 8px;
+            background: #f8fafc;
+            border-left: 4px solid #2563eb;
+        }
+
+        .filter-box h4 {
+            font-size: 13px;
+            color: #2563eb;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .filter-box p {
+            font-size: 13px;
+            color: #333;
+        }
+
+        /* Summary Cards */
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .summary-card {
+            padding: 20px;
+            border-radius: 8px;
+            text-align: center;
+            border: 2px solid #e5e7eb;
+            background: #f9fafb;
+        }
+
+        .card-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+
+        .card-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2563eb;
+        }
+
+        .card-currency {
+            font-size: 18px;
+            color: #2563eb;
+        }
+
+        /* Purchases Table */
+        .purchases-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+        }
+
+        .purchases-table thead {
+            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            color: white;
+        }
+
+        .purchases-table th {
+            padding: 12px 10px;
+            text-align: left;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .purchases-table th:last-child,
+        .purchases-table td:last-child {
+            text-align: right;
+        }
+
+        .purchases-table tbody tr {
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .purchases-table tbody tr:hover {
+            background: #f9fafb;
+        }
+
+        .purchases-table tbody tr:nth-child(even) {
+            background: #fcfcfc;
+        }
+
+        .purchases-table td {
+            padding: 12px 10px;
+            font-size: 13px;
+            color: #333;
+        }
+
+        .invoice-column {
+            font-weight: 600;
+            color: #2563eb;
+        }
+
+        .supplier-column {
+            color: #1e293b;
+            font-weight: 500;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .status-paid {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .status-partial {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-unpaid {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .amount-column {
+            font-weight: 600;
+            color: #1e293b;
+        }
+
+        /* Grand Summary Section */
+        .grand-summary {
+            display: flex;
+            justify-content: flex-end;
+            margin-bottom: 30px;
+        }
+
+        .summary-box {
+            width: 400px;
+            border: 2px solid #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        .summary-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 12px 20px;
+            font-size: 14px;
+        }
+
+        .summary-row:not(:last-child) {
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .summary-row.subtotal {
+            background: #f9fafb;
+        }
+
+        .summary-row.total {
+            background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+            color: white;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .summary-row.paid {
+            background: #dcfce7;
+            color: #166534;
+            font-weight: 600;
+        }
+
+        .summary-row.due {
+            background: #fee2e2;
+            color: #991b1b;
+            font-weight: 600;
+        }
+
+        /* Footer */
+        .report-footer {
+            margin-top: 40px;
+            padding-top: 20px;
+            border-top: 2px solid #e5e7eb;
+            text-align: center;
+        }
+
+        .footer-text {
+            font-size: 11px;
+            color: #999;
+            margin: 10px 0;
+        }
+
+        .footer-divider {
+            height: 1px;
+            background: #e5e7eb;
+            margin: 20px 0;
+        }
+
+        /* Utility Classes */
+        .text-right {
+            text-align: right;
+        }
+
+        .text-center {
+            text-align: center;
+        }
+
+        .font-bold {
+            font-weight: 600;
+        }
+
+        .currency {
+            font-weight: 600;
+        }
+
+        /* Page Break for PDF */
+        @media print {
+            .report-container {
+                box-shadow: none;
+                page-break-inside: avoid;
+            }
+
+            .purchases-table {
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="report-container">
+        <!-- Header -->
+        <div class="report-header">
+            <div class="company-info">
+                <div class="company-name">Petrol Pump Operations</div>
+                <div class="company-tagline">Fuel Your Journey</div>
+                <div class="company-details">
+                    <p>Complete Fuel Management & Operations</p>
+                </div>
+            </div>
+            <div class="report-title-section">
+                <div class="report-title">PURCHASES</div>
+                <div class="report-subtitle">DETAILED REPORT</div>
+                <div class="report-date">
+                    Generated: <%= new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) %>
+                </div>
+            </div>
+        </div>
+
+        <!-- Filter/Period Info Section -->
+        <div class="filter-section">
+            <div class="filter-box">
+                <h4>Report Period</h4>
+                <p><strong>Report Generated On:</strong><br><%= new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) %></p>
+            </div>
+            <div class="filter-box">
+                <h4>Total Records</h4>
+                <p><strong><%= purchases.length %></strong> Purchase(s) in this report</p>
+            </div>
+            <div class="filter-box">
+                <h4>Report Status</h4>
+                <p><strong>Status:</strong> Complete</p>
+            </div>
+        </div>
+
+        <!-- Summary Cards -->
+        <div class="summary-cards">
+            <div class="summary-card">
+                <div class="card-label">Total Purchases</div>
+                <div class="card-value"><%= purchases.length %></div>
+            </div>
+            <div class="summary-card">
+                <div class="card-label">Total Purchase Amount</div>
+                <div class="card-value">
+                    <span class="card-currency">₹</span><%= (purchases.reduce((sum, p) => sum + (p.totalAmount || 0), 0)).toFixed(2) %>
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="card-label">Total Tax Amount</div>
+                <div class="card-value">
+                    <span class="card-currency">₹</span><%= (purchases.reduce((sum, p) => sum + (p.items ? p.items.reduce((itemSum, item) => itemSum + (item.taxAmount || 0), 0) : 0), 0)).toFixed(2) %>
+                </div>
+            </div>
+            <div class="summary-card">
+                <div class="card-label">Total Outstanding Due</div>
+                <div class="card-value">
+                    <span class="card-currency">₹</span><%= (purchases.reduce((sum, p) => sum + (p.dueAmount || 0), 0)).toFixed(2) %>
+                </div>
+            </div>
+        </div>
+
+        <!-- Purchases Table -->
+        <table class="purchases-table">
+            <thead>
+                <tr>
+                    <th style="width: 5%;">#</th>
+                    <th style="width: 12%;">Invoice No.</th>
+                    <th style="width: 18%;">Supplier Name</th>
+                    <th style="width: 12%;">Purchase Date</th>
+                    <th style="width: 8%;">Items</th>
+                    <th style="width: 12%;">Total Amount</th>
+                    <th style="width: 10%;">Tax Amount</th>
+                    <th style="width: 12%;">Paid Amount</th>
+                    <th style="width: 11%;">Due Amount</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% if (purchases && purchases.length > 0) { %>
+                    <% purchases.forEach((purchase, index) => { %>
+                        <tr>
+                            <td><%= index + 1 %></td>
+                            <td class="invoice-column"><%= purchase.invoiceNo || 'N/A' %></td>
+                            <td class="supplier-column"><%= purchase.supplier?.name || 'N/A' %></td>
+                            <td><%= new Date(purchase.purchaseDate).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) %></td>
+                            <td class="text-center"><%= purchase.totalItems || purchase.items?.length || 0 %></td>
+                            <td class="amount-column text-right">₹<%= (purchase.totalAmount || 0).toFixed(2) %></td>
+                            <td class="text-right">₹<%= (purchase.items ? purchase.items.reduce((sum, item) => sum + (item.taxAmount || 0), 0) : 0).toFixed(2) %></td>
+                            <td class="amount-column text-right">₹<%= (purchase.paidAmount || 0).toFixed(2) %></td>
+                            <td class="text-right">
+                                <% if ((purchase.dueAmount || 0) > 0) { %>
+                                    <span class="font-bold">₹<%= (purchase.dueAmount || 0).toFixed(2) %></span>
+                                <% } else { %>
+                                    <span>₹0.00</span>
+                                <% } %>
+                            </td>
+                        </tr>
+                    <% }); %>
+                <% } else { %>
+                    <tr>
+                        <td colspan="9" class="text-center" style="padding: 30px;">
+                            <span style="color: #999;">No purchases found</span>
+                        </td>
+                    </tr>
+                <% } %>
+            </tbody>
+        </table>
+
+        <!-- Grand Summary Section -->
+        <div class="grand-summary">
+            <div class="summary-box">
+                <div class="summary-row subtotal">
+                    <span>Total Subtotal</span>
+                    <span>₹<%= (purchases.reduce((sum, p) => sum + ((p.totalAmount || 0) - (p.items ? p.items.reduce((itemSum, item) => itemSum + (item.taxAmount || 0), 0) : 0)), 0)).toFixed(2) %></span>
+                </div>
+                <div class="summary-row subtotal">
+                    <span>Total Tax</span>
+                    <span>₹<%= (purchases.reduce((sum, p) => sum + (p.items ? p.items.reduce((itemSum, item) => itemSum + (item.taxAmount || 0), 0) : 0), 0)).toFixed(2) %></span>
+                </div>
+                <div class="summary-row total">
+                    <span>GRAND TOTAL</span>
+                    <span>₹<%= (purchases.reduce((sum, p) => sum + (p.totalAmount || 0), 0)).toFixed(2) %></span>
+                </div>
+                <div class="summary-row paid">
+                    <span>Total Paid Amount</span>
+                    <span>₹<%= (purchases.reduce((sum, p) => sum + (p.paidAmount || 0), 0)).toFixed(2) %></span>
+                </div>
+                <% if ((purchases.reduce((sum, p) => sum + (p.dueAmount || 0), 0)) > 0) { %>
+                    <div class="summary-row due">
+                        <span>Total Due Amount</span>
+                        <span>₹<%= (purchases.reduce((sum, p) => sum + (p.dueAmount || 0), 0)).toFixed(2) %></span>
+                    </div>
+                <% } %>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="report-footer">
+            <div class="footer-divider"></div>
+            <div class="footer-text">
+                <p><strong>Report Summary</strong></p>
+                <p>This Purchase Report contains all purchase transactions for the specified period.</p>
+                <p>Total Transactions: <strong><%= purchases.length %></strong></p>
+            </div>
+            <div class="footer-divider"></div>
+            <div class="footer-text">
+                <p>This is a system-generated report. For any queries, please contact your administrator.</p>
+                <p>© <%= new Date().getFullYear() %> Petrol Pump Operations. All rights reserved.</p>
+            </div>
+        </div>
+    </div>
+</body>
+
+</html>

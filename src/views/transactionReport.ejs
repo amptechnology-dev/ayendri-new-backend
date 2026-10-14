@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Transaction Report</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #333; line-height: 1.6; padding: 20px; background: #f5f5f5; }
+        .report-container { max-width: 1000px; margin: 0 auto; background: white; padding: 40px; box-shadow: 0 0 20px rgba(0,0,0,0.1); }
+        .report-header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:36px; padding-bottom:20px; border-bottom:3px solid #2563eb; }
+        .company-name { font-size:28px; font-weight:700; color:#2563eb; margin-bottom:6px; }
+        .company-tagline { font-size:14px; color:#666; margin-bottom:10px; }
+        .company-details { font-size:12px; color:#666; }
+        .report-title { font-size:30px; font-weight:700; color:#1e293b; }
+        .report-subtitle { font-size:14px; color:#2563eb; font-weight:600; }
+        .report-date { font-size:13px; color:#666; }
+        .filter-section { display:flex; gap:20px; margin-bottom:20px; }
+        .filter-box { flex:1; padding:12px; border-radius:8px; background:#f8fafc; border-left:4px solid #2563eb; }
+        .filter-box h4{ font-size:12px;color:#2563eb;margin-bottom:6px;text-transform:uppercase;font-weight:600; }
+        .summary-cards { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:22px; }
+        .summary-card { padding:16px; border-radius:8px; background:#f9fafb; border:2px solid #e5e7eb; text-align:center; }
+        .card-label { font-size:12px;color:#666;text-transform:uppercase;margin-bottom:8px;font-weight:600; }
+        .card-value { font-size:20px;font-weight:700;color:#2563eb; }
+        .transactions-table { width:100%; border-collapse:collapse; margin-bottom:24px; }
+        .transactions-table thead { background:linear-gradient(135deg,#2563eb 0%, #1e40af 100%); color:#fff; }
+        .transactions-table th { padding:10px 8px; font-size:12px; text-align:left; font-weight:600; text-transform:uppercase; }
+        .transactions-table td { padding:10px 8px; font-size:13px; color:#333; vertical-align:top; }
+        .transactions-table tbody tr { border-bottom:1px solid #e5e7eb; }
+        .transactions-table tbody tr:nth-child(even){ background:#fcfcfc; }
+        .text-right{ text-align:right; }
+        .grand-summary{ display:flex; justify-content:flex-end; margin-bottom:20px; }
+        .summary-box{ width:380px; border:2px solid #e5e7eb; border-radius:8px; overflow:hidden; }
+        .summary-row{ display:flex; justify-content:space-between; padding:12px 18px; font-size:14px; }
+        .summary-row:not(:last-child){ border-bottom:1px solid #e5e7eb; }
+        .summary-row.total{ background:linear-gradient(135deg,#2563eb 0%, #1e40af 100%); color:#fff; font-weight:700; }
+        .report-footer{ margin-top:30px; padding-top:18px; border-top:2px solid #e5e7eb; text-align:center; }
+        .footer-text{ font-size:11px; color:#999; margin:8px 0; }
+        @media print { .report-container{ box-shadow:none; page-break-inside:avoid; } .transactions-table{ page-break-inside:auto; } }
+    </style>
+</head>
+<body>
+    <% const safeTx = Array.isArray(transactions) ? transactions : []; %>
+    <% const computedTotalCount = safeTx.length; %>
+    <% const computedTotalAmount = safeTx.reduce((s, t) => s + (Number(t.amount) || 0), 0); %>
+    <% const computedTotalCredit = safeTx.reduce((s, t) => {
+        const txType = (t.type || '').toString().toUpperCase();
+        return s + ((txType === 'CREDIT' || txType === 'INCOME') ? (Number(t.amount) || 0) : 0);
+    }, 0); %>
+    <% const computedTotalDebit = safeTx.reduce((s, t) => {
+        const txType = (t.type || '').toString().toUpperCase();
+        return s + ((txType === 'DEBIT' || txType === 'EXPENSE') ? (Number(t.amount) || 0) : 0);
+    }, 0); %>
+
+    <% // Prefer controller-provided summaries when available, otherwise fall back to computed values %>
+    <% const showTotalCount = typeof totalCount !== 'undefined' ? totalCount : computedTotalCount; %>
+    <% const showTotalCredit = typeof totalCredit !== 'undefined' ? Number(totalCredit) : computedTotalCredit; %>
+    <% const showTotalDebit = typeof totalDebit !== 'undefined' ? Number(totalDebit) : computedTotalDebit; %>
+    <% const showTotalAmount = typeof totalAmount !== 'undefined' ? Number(totalAmount) : (showTotalCredit + showTotalDebit || computedTotalAmount); %>
+    <% const showNetBalance = typeof netBalance !== 'undefined' ? Number(netBalance) : (showTotalCredit - showTotalDebit); %>
+
+    <% const fmt = (v) => Number(v || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); %>
+
+    <div class="report-container">
+        <div class="report-header">
+            <div>
+                <div class="company-name">Petrol Pump Operations</div>
+                <div class="company-tagline">Fuel Your Journey</div>
+                <div class="company-details"><p>Complete Fuel Management & Operations</p></div>
+            </div>
+            <div class="report-meta">
+                <div class="report-title">TRANSACTIONS</div>
+                <div class="report-subtitle">DETAILED REPORT</div>
+                <div class="report-date">Generated: <%= new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) %></div>
+            </div>
+        </div>
+
+        <div class="filter-section">
+            <div class="filter-box"><h4>Report Period</h4><p><strong>Generated On:</strong><br><%= new Date().toLocaleDateString('en-IN', { day:'numeric', month:'long', year:'numeric'}) %></p></div>
+            <div class="filter-box"><h4>Total Records</h4><p><strong><%= showTotalCount %></strong> transaction(s)</p></div>
+            <div class="filter-box"><h4>Summary</h4><p><strong>Total Transaction Amount:</strong> ₹<%= fmt(showTotalAmount) %></p></div>
+        </div>
+
+        <div class="summary-cards">
+            <div class="summary-card"><div class="card-label">Transactions</div><div class="card-value"><%= showTotalCount %></div></div>
+            <div class="summary-card"><div class="card-label">Total Transaction Amount</div><div class="card-value">₹<%= fmt(showTotalAmount) %></div></div>
+            <div class="summary-card"><div class="card-label">Total Credit</div><div class="card-value">₹<%= fmt(showTotalCredit) %></div></div>
+            <div class="summary-card"><div class="card-label">Total Debit</div><div class="card-value">₹<%= fmt(showTotalDebit) %></div></div>
+        </div>
+
+        <table class="transactions-table">
+            <thead>
+                <tr>
+                    <th style="width:5%">#</th>
+                    <th style="width:14%">Date</th>
+                    <th style="width:20%">Account Head</th>
+                    <th style="width:10%">Type</th>
+                    <th style="width:14%">Payment</th>
+                    <th style="width:27%">Note</th>
+                    <th style="width:10%" class="text-right">Amount</th>
+                </tr>
+            </thead>
+            <tbody>
+                <% if (safeTx.length > 0) { %>
+                    <% safeTx.forEach((tx, i) => { %>
+                            <tr>
+                                <td><%= i + 1 %></td>
+                                <td><%= new Date(tx.transactionDate).toLocaleDateString('en-IN', { day:'2-digit', month:'short', year:'numeric' }) %></td>
+                                <td><%= tx.accountHeadName || 'N/A' %></td>
+                                <td><%= (tx.type || '').toUpperCase() %></td>
+                                <td><%= tx.paymentMethod || 'N/A' %></td>
+                                <td><%= tx.note || '-' %></td>
+                                <td class="text-right">₹<%= fmt(Number(tx.amount) || 0) %></td>
+                            </tr>
+                    <% }) %>
+                <% } else { %>
+                    <tr><td colspan="7" class="text-center" style="padding:28px;color:#999">No transactions found</td></tr>
+                <% } %>
+            </tbody>
+        </table>
+
+        <div class="grand-summary">
+            <div class="summary-box">
+                <div class="summary-row"><span>Total Transactions</span><span><%= showTotalCount %></span></div>
+                <div class="summary-row"><span>Total Credit</span><span>₹<%= fmt(showTotalCredit) %></span></div>
+                <div class="summary-row"><span>Total Debit</span><span>₹<%= fmt(showTotalDebit) %></span></div>
+                <div class="summary-row total"><span>Net Balance</span><span>₹<%= fmt(showNetBalance) %></span></div>
+            </div>
+        </div>
+
+        <div class="report-footer">
+           <div class="footer-text">© <%= new Date().getFullYear() %> Petrol Pump Operations</div>
+        </div>
+    </div>
+</body>
+
+</html>

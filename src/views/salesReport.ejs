@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Sales Report</title>
+	<style>
+		* {
+			margin: 0;
+			padding: 0;
+			box-sizing: border-box;
+		}
+
+		body {
+			font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+			color: #333;
+			line-height: 1.6;
+			padding: 20px;
+			background: #f5f5f5;
+		}
+
+		.report-container {
+			max-width: 1000px;
+			margin: 0 auto;
+			background: white;
+			padding: 40px;
+			box-shadow: 0 0 20px rgba(0, 0, 0, 0.1);
+		}
+
+		.report-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			margin-bottom: 35px;
+			padding-bottom: 20px;
+			border-bottom: 3px solid #2563eb;
+		}
+
+		.company-name {
+			font-size: 28px;
+			font-weight: bold;
+			color: #2563eb;
+			margin-bottom: 5px;
+		}
+
+		.company-tagline {
+			font-size: 14px;
+			color: #666;
+			margin-bottom: 12px;
+		}
+
+		.company-details {
+			font-size: 12px;
+			color: #666;
+			line-height: 1.8;
+		}
+
+		.report-title-section {
+			text-align: right;
+		}
+
+		.report-title {
+			font-size: 32px;
+			font-weight: bold;
+			color: #1e293b;
+			margin-bottom: 8px;
+		}
+
+		.report-subtitle {
+			font-size: 16px;
+			color: #2563eb;
+			font-weight: 600;
+			margin-bottom: 10px;
+		}
+
+		.report-date {
+			font-size: 13px;
+			color: #666;
+		}
+
+		.filter-section {
+			display: flex;
+			justify-content: space-between;
+			margin-bottom: 30px;
+			gap: 20px;
+		}
+
+		.filter-box {
+			flex: 1;
+			padding: 15px;
+			border-radius: 8px;
+			background: #f8fafc;
+			border-left: 4px solid #2563eb;
+		}
+
+		.filter-box h4 {
+			font-size: 13px;
+			color: #2563eb;
+			margin-bottom: 8px;
+			text-transform: uppercase;
+			letter-spacing: 0.5px;
+		}
+
+		.filter-box p {
+			font-size: 13px;
+			color: #333;
+		}
+
+		.summary-cards {
+			display: grid;
+			grid-template-columns: repeat(4, 1fr);
+			gap: 16px;
+			margin-bottom: 30px;
+		}
+
+		.summary-card {
+			padding: 18px;
+			border-radius: 8px;
+			text-align: center;
+			border: 2px solid #e5e7eb;
+			background: #f9fafb;
+		}
+
+		.card-label {
+			font-size: 12px;
+			color: #666;
+			text-transform: uppercase;
+			margin-bottom: 8px;
+			font-weight: 600;
+			letter-spacing: 0.5px;
+		}
+
+		.card-value {
+			font-size: 23px;
+			font-weight: bold;
+			color: #2563eb;
+		}
+
+		.sales-table {
+			width: 100%;
+			border-collapse: collapse;
+			margin-bottom: 28px;
+		}
+
+		.sales-table thead {
+			background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+			color: white;
+		}
+
+		.sales-table th {
+			padding: 12px 10px;
+			text-align: left;
+			font-size: 12px;
+			font-weight: 600;
+			text-transform: uppercase;
+			letter-spacing: 0.5px;
+		}
+
+		.sales-table td {
+			padding: 12px 10px;
+			font-size: 13px;
+			color: #333;
+			vertical-align: top;
+		}
+
+		.sales-table tbody tr {
+			border-bottom: 1px solid #e5e7eb;
+		}
+
+		.sales-table tbody tr:nth-child(even) {
+			background: #fcfcfc;
+		}
+
+		.sales-table th:last-child,
+		.sales-table td:last-child {
+			text-align: right;
+		}
+
+		.invoice-column {
+			font-weight: 600;
+			color: #2563eb;
+		}
+
+		.amount-column {
+			font-weight: 600;
+			color: #1e293b;
+		}
+
+		.item-list {
+			font-size: 11px;
+			color: #475569;
+			line-height: 1.4;
+		}
+
+		.payment-badge {
+			display: inline-block;
+			padding: 4px 10px;
+			border-radius: 20px;
+			font-size: 11px;
+			font-weight: 600;
+			background: #e0e7ff;
+			color: #1e40af;
+			text-transform: uppercase;
+		}
+
+		.grand-summary {
+			display: flex;
+			justify-content: flex-end;
+			margin-bottom: 28px;
+		}
+
+		.summary-box {
+			width: 400px;
+			border: 2px solid #e5e7eb;
+			border-radius: 8px;
+			overflow: hidden;
+		}
+
+		.summary-row {
+			display: flex;
+			justify-content: space-between;
+			padding: 12px 20px;
+			font-size: 14px;
+		}
+
+		.summary-row:not(:last-child) {
+			border-bottom: 1px solid #e5e7eb;
+		}
+
+		.summary-row.sub {
+			background: #f9fafb;
+		}
+
+		.summary-row.total {
+			background: linear-gradient(135deg, #2563eb 0%, #1e40af 100%);
+			color: white;
+			font-weight: bold;
+			font-size: 16px;
+		}
+
+		.report-footer {
+			margin-top: 36px;
+			padding-top: 20px;
+			border-top: 2px solid #e5e7eb;
+			text-align: center;
+		}
+
+		.footer-text {
+			font-size: 11px;
+			color: #999;
+			margin: 8px 0;
+		}
+
+		.text-center {
+			text-align: center;
+		}
+
+		.text-right {
+			text-align: right;
+		}
+
+		@media print {
+			.report-container {
+				box-shadow: none;
+				page-break-inside: avoid;
+			}
+
+			.sales-table {
+				page-break-inside: auto;
+			}
+
+			.sales-table tr {
+				page-break-inside: avoid;
+			}
+		}
+	</style>
+</head>
+
+<body>
+	<% const safeSales = Array.isArray(sales) ? sales : []; %>
+	<% const totalQty = safeSales.reduce((sum, s) => sum + (s.totalQty || 0), 0); %>
+	<% const totalAmount = safeSales.reduce((sum, s) => sum + (s.totalAmount || 0), 0); %>
+	<% const totalItems = safeSales.reduce((sum, s) => sum + ((s.saleItems || []).filter(i => i && i._id).length), 0); %>
+	<% const avgBill = safeSales.length ? (totalAmount / safeSales.length) : 0; %>
+
+	<div class="report-container">
+		<div class="report-header">
+			<div>
+				<div class="company-name">Petrol Pump Operations</div>
+				<div class="company-tagline">Fuel Your Journey</div>
+				<div class="company-details">
+					<p>Complete Fuel Management & Operations</p>
+				</div>
+			</div>
+			<div class="report-title-section">
+				<div class="report-title">SALES</div>
+				<div class="report-subtitle">DETAILED REPORT</div>
+				<div class="report-date">
+					Generated: <%= new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) %>
+				</div>
+			</div>
+		</div>
+
+		<div class="filter-section">
+			<div class="filter-box">
+				<h4>Report Period</h4>
+				<p><strong>Generated On:</strong><br><%= new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' }) %></p>
+			</div>
+			<div class="filter-box">
+				<h4>Total Records</h4>
+				<p><strong><%= safeSales.length %></strong> Sale(s) in this report</p>
+			</div>
+			<div class="filter-box">
+				<h4>Report Status</h4>
+				<p><strong>Status:</strong> Complete</p>
+			</div>
+		</div>
+
+		<div class="summary-cards">
+			<div class="summary-card">
+				<div class="card-label">Total Sales</div>
+				<div class="card-value"><%= safeSales.length %></div>
+			</div>
+			<div class="summary-card">
+				<div class="card-label">Total Quantity</div>
+				<div class="card-value"><%= totalQty.toFixed(2) %></div>
+			</div>
+			<div class="summary-card">
+				<div class="card-label">Total Line Items</div>
+				<div class="card-value"><%= totalItems %></div>
+			</div>
+			<div class="summary-card">
+				<div class="card-label">Total Sales Amount</div>
+				<div class="card-value">₹<%= totalAmount.toFixed(2) %></div>
+			</div>
+		</div>
+
+		<table class="sales-table">
+			<thead>
+				<tr>
+					<th style="width: 5%;">#</th>
+					<th style="width: 14%;">Invoice No.</th>
+					<th style="width: 12%;">Date</th>
+					<th style="width: 10%;">Qty</th>
+					<th style="width: 10%;">Items</th>
+					<th style="width: 21%;">Products</th>
+					<th style="width: 12%;">Payment</th>
+					<th style="width: 16%;">Amount</th>
+				</tr>
+			</thead>
+			<tbody>
+				<% if (safeSales.length > 0) { %>
+					<% safeSales.forEach((sale, index) => { %>
+						<% const validItems = (sale.saleItems || []).filter(i => i && i._id); %>
+						<tr>
+							<td><%= index + 1 %></td>
+							<td class="invoice-column"><%= sale.invoiceNumber || 'N/A' %></td>
+							<td><%= new Date(sale.createdAt).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) %></td>
+							<td><%= (sale.totalQty || 0).toFixed(2) %></td>
+							<td class="text-center"><%= validItems.length %></td>
+							<td>
+								<div class="item-list">
+									<% if (validItems.length > 0) { %>
+										<% validItems.slice(0, 3).forEach((item) => { %>
+											<div><%= item.product?.name || 'N/A' %> x <%= item.qty || 0 %></div>
+										<% }); %>
+										<% if (validItems.length > 3) { %>
+											<div>+<%= validItems.length - 3 %> more</div>
+										<% } %>
+									<% } else { %>
+										<div>N/A</div>
+									<% } %>
+								</div>
+							</td>
+							<td>
+								<span class="payment-badge"><%= sale.paymentMethod || 'N/A' %></span>
+							</td>
+							<td class="amount-column text-right">₹<%= (sale.totalAmount || 0).toFixed(2) %></td>
+						</tr>
+					<% }); %>
+				<% } else { %>
+					<tr>
+						<td colspan="8" class="text-center" style="padding: 30px; color: #999;">No sales found</td>
+					</tr>
+				<% } %>
+			</tbody>
+		</table>
+
+		<div class="grand-summary">
+			<div class="summary-box">
+				<div class="summary-row sub">
+					<span>Total Sales Entries</span>
+					<span><%= safeSales.length %></span>
+				</div>
+				<div class="summary-row sub">
+					<span>Total Quantity Sold</span>
+					<span><%= totalQty.toFixed(2) %></span>
+				</div>
+				<div class="summary-row sub">
+					<span>Average Bill Value</span>
+					<span>₹<%= avgBill.toFixed(2) %></span>
+				</div>
+				<div class="summary-row total">
+					<span>GRAND TOTAL</span>
+					<span>₹<%= totalAmount.toFixed(2) %></span>
+				</div>
+			</div>
+		</div>
+
+		<div class="report-footer">
+			<div class="footer-text">
+				<p><strong>Report Summary</strong></p>
+				<p>This Sales Report contains all sales transactions for the selected filters.</p>
+				<p>Total Transactions: <strong><%= safeSales.length %></strong></p>
+			</div>
+			<div class="footer-text">
+				<p>This is a system-generated report. For any queries, please contact your administrator.</p>
+				<p>© <%= new Date().getFullYear() %> Petrol Pump Operations. All rights reserved.</p>
+			</div>
+		</div>
+	</div>
+</body>
+
+</html>
