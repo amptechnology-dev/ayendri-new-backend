@@ -1,7 +1,10 @@
 const StoreModel = require("../model/store.model.js");
 const StoreSettingModel = require("../model/storeSetting.model.js");
 const { updateStoreSettingSchema } = require("../schema/storeSetting.schema.js");
-const { DEFAULT_SETTINGS } = require("../helper/storeSettings.js");
+const {
+  DEFAULT_SETTINGS,
+  resolveBusinessType,
+} = require("../helper/storeSettings.js");
 const { resolvePaymentMode } = require("../helper/storePolicy.js");
 
 const resolveStore = async (userId, storeId) => {
@@ -16,6 +19,7 @@ const toPayload = (settings) => {
     hasStockManagement: settings
       ? settings.hasStockManagement
       : DEFAULT_SETTINGS.hasStockManagement,
+    storeBusinessType: resolveBusinessType(settings),
     hasDelivery: settings ? settings.hasDelivery !== false : true,
     paymentMode,
     paymentFirst: paymentMode === "ONLINE_ONLY",
@@ -52,9 +56,11 @@ const updateStoreSettingsController = async (req, res) => {
       return res.status(404).json({ success: false, message: "Store not found" });
     }
 
+    // storeBusinessType / hasStockManagement schema te nei, client pathaleo strip hoye jay
     const parsed = updateStoreSettingSchema.parse(req.body);
 
     const $set = { ...parsed };
+
     // purono paymentFirst field ke paymentMode er sathe mil rakhi
     if (parsed.paymentMode) {
       $set.paymentFirst = parsed.paymentMode === "ONLINE_ONLY";

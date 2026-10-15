@@ -20,9 +20,10 @@ const {
   logStockChange,
   notifyLowStock,
 } = require("../helper/stockManager.js");
-// [STOCK] store setting / product flag helper
+// [STOCK] store type / product flag helper
 const {
-  getStockManagementEnabled,
+  getStoreBusinessType,
+  resolveProductStockManaged,
   isStockManaged,
 } = require("../helper/storeSettings.js");
 // [TIER] quantity based pricing
@@ -207,6 +208,19 @@ const syncTiers = (data, body, hasVariants) => {
   });
 };
 
+// [STORE TYPE] stock mandatory product e opening stock dewa hoyeche kina
+const isBlank = (v) => v === undefined || v === null || v === "";
+
+const isOpeningStockMissing = (body, hasVariants) => {
+  if (!hasVariants) return isBlank(body.openingStock);
+  return (body.variants || []).some((v) => {
+    const sizes = Array.isArray(v.sizeVariants) ? v.sizeVariants : [];
+    return sizes.length
+      ? sizes.some((sv) => isBlank(sv.openingStock))
+      : isBlank(v.openingStock);
+  });
+};
+
 // [HSN] 4 / 6 / 8 digit
 const HSN_REGEX = /^(\d{4}|\d{6}|\d{8})$/;
 
@@ -369,8 +383,25 @@ const createProduct = async (req, res) => {
     const hsnError = applyHsn(body, data);
     if (hsnError) return hsnErrorResponse(res, hsnError);
 
-    // [STOCK] store settings e stock management on ache kina (product e snapshot hishebe save hobe)
-    const stockEnabled = await getStockManagementEnabled(parsedData.storeId);
+    // [STORE TYPE] store type + product er made-for-product flag theke decide hobe ei product e stock thakbe kina
+    const businessType = await getStoreBusinessType(parsedData.storeId);
+    const askedMadeForProduct =
+      String(body.isMadeForProduct).trim().toLowerCase() === "true";
+    const stockEnabled = resolveProductStockManaged(
+      businessType,
+      askedMadeForProduct,
+    );
+
+    // [STORE TYPE] stock mandatory hole opening stock dite hobe
+    if (stockEnabled && isOpeningStockMissing(body, hasVariants)) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: [
+          { field: "openingStock", message: "Opening stock is required" },
+        ],
+      });
+    }
 
     data.images = await uploadSimpleImages(req.files);
 
@@ -398,6 +429,7 @@ const createProduct = async (req, res) => {
       ...data, // [GST] data.gst + data.gstInclusive eikhane diye jay
       // [STOCK] data er por rakhlam jate validateProduct er kono value eta override na kore
       hasStockManagement: stockEnabled,
+      isMadeForProduct: !stockEnabled,
     });
 
     // [STOCK] stock off hole low stock flag shobshomoy false
@@ -535,6 +567,7 @@ const getAllProducts = async (req, res) => {
           hasVariants: 1,
           hasColor: 1,
           hasStockManagement: 1,
+          isMadeForProduct: 1, // [STORE TYPE]
           minOfferPrice: 1,
           maxOfferPrice: 1,
           deliveryTime: 1,
@@ -886,6 +919,8 @@ const updateProduct = async (req, res) => {
 
     // [STOCK] hasStockManagement snapshot create er por kokhono change hobe na
     delete updateData.hasStockManagement;
+    // [STORE TYPE] made-for-product flag o create er por change hobe na
+    delete updateData.isMadeForProduct;
 
     const updatedProduct = await ProductModel.findByIdAndUpdate(
       id,
@@ -1276,8 +1311,8 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               priceTiers: 1,
               mrp: 1,
               offerPrice: 1,
-              gst: 1, 
-              gstInclusive: 1, 
+              gst: 1,
+              gstInclusive: 1,
               hsnCode: 1,
               stock: 1,
               hasVariants: 1,

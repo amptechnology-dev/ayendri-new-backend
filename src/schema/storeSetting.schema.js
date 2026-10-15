@@ -1,6 +1,5 @@
 const { z } = require("zod");
 
-// shob field optional: jeta toggle korbe shudhu seta pathale-i cholbe
 const updateStoreSettingSchema = z
   .object({
     hasDelivery: z.boolean().optional(),

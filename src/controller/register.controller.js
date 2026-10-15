@@ -24,6 +24,11 @@ const {
   buildResponseUser,
 } = require("../helper/authToken");
 const {
+  STORE_BUSINESS_TYPES,
+  getStoreBusinessType,
+  setStoreBusinessType,
+} = require("../helper/storeSettings.js");
+const {
   generateStoreQr,
   safeGenerateStoreQr,
 } = require("../helper/storeQr.js");
@@ -488,6 +493,15 @@ const createUser = async (req, res) => {
       return;
     }
 
+    // [STORE TYPE] ADMIN store create korar somoy type select korte hobe
+    const storeBusinessType = clean(req.body.storeBusinessType);
+    if (!STORE_BUSINESS_TYPES.includes(storeBusinessType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Store business type is required",
+      });
+    }
+
     const normalizedEmail = normalizeEmail(email);
 
     if (await accountExists(normalizedEmail, "STORE")) {
@@ -564,6 +578,9 @@ const createUser = async (req, res) => {
       isVerify: true,
       isVisitor: toBool(req.body.isVisitor),
     });
+
+    // [STORE TYPE] ei store er business type + hasStockManagement set
+    await setStoreBusinessType(store._id, storeBusinessType);
 
     await safeGenerateStoreQr(store);
 
@@ -859,8 +876,11 @@ const singleStore = async (req, res) => {
       });
     }
 
+    // [STORE TYPE] settings doc theke resolved type (purono store er jonno fallback shoho)
+    const storeBusinessType = await getStoreBusinessType(store[0]._id);
+
     return res.status(200).json({
-      store: store[0],
+      store: { ...store[0], storeBusinessType },
     });
   } catch (error) {
     console.error("Error fetching store:", error);
@@ -881,6 +901,17 @@ const updateStoreAndUser = async (req, res) => {
     if (!store) {
       return res.status(404).json({
         message: "Store not found",
+      });
+    }
+
+    // [STORE TYPE] shudhu ADMIN change korte pare, STORE pathaleo ignore
+    const requestedType = isAdmin
+      ? clean(req.body.storeBusinessType)
+      : undefined;
+    if (requestedType && !STORE_BUSINESS_TYPES.includes(requestedType)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid store business type",
       });
     }
 
@@ -988,6 +1019,11 @@ const updateStoreAndUser = async (req, res) => {
       },
       { new: true },
     );
+
+    // [STORE TYPE] ADMIN type pathale settings update (hasStockManagement o sync hoy)
+    if (requestedType) {
+      await setStoreBusinessType(updatedStore._id, requestedType);
+    }
 
     if (req.body.storeName && req.body.storeName !== store.storeName) {
       await safeGenerateStoreQr(updatedStore);

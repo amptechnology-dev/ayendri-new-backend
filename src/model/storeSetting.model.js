@@ -10,6 +10,10 @@ const storeSettingSchema = new mongoose.Schema(
       unique: true,
     },
     hasStockManagement: { type: Boolean, default: false },
+    storeBusinessType: {
+      type: String,
+      enum: ["RETAIL", "MADE_FOR_PRODUCT", "BOTH"],
+    },
     // [DELIVERY] false hole ei store e delivery estimate / shipping charge / courier / pincode check kichu thakbe na
     hasDelivery: { type: Boolean, default: true },
     // [PAYMENT] BOTH = COD + Online, ONLINE_ONLY = payment age (COD bondho), OFF = app e kono payment nei
