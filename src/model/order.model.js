@@ -172,7 +172,11 @@ const shipmentSchema = new mongoose.Schema(
     assignedAt: { type: Date, default: null },
 
     etd: { type: Date, default: null }, // courier er estimated delivery date
-    etdSource: { type: String, enum: ["ESTIMATE", "COURIER"], default: "ESTIMATE" },
+    etdSource: {
+      type: String,
+      enum: ["ESTIMATE", "COURIER"],
+      default: "ESTIMATE",
+    },
     appliedWeight: { type: Number, default: null }, // Shiprocket je weight e charge korlo
     courierSwitched: { type: Boolean, default: false }, // quoted courier na pele auto-assign hole true
 
@@ -280,6 +284,8 @@ const orderSchema = new mongoose.Schema(
 
     deliveryAddress: { type: deliveryAddressSchema, required: true },
     note: { type: String, default: null },
+    note: { type: String, default: null },
+    bookingDate: { type: Date, default: null },
     expectedDeliveryDate: { type: Date, default: null },
     deliveryInfo: { type: deliveryInfoSchema, default: null },
     shippingCharge: { type: Number, default: 0, min: 0 },

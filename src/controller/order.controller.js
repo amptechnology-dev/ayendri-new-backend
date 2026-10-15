@@ -198,6 +198,7 @@ const attemptStoreCheckout = async ({
   lines, // [{ productId, variantId (unitId or null), quantity }]
   deliveryAddress,
   note,
+  bookingDate, // [BOOKING] "YYYY-MM-DD" (dryRun e lagbe na)
   paymentMethod,
   dryRun = false,
 }) => {
@@ -487,6 +488,7 @@ const attemptStoreCheckout = async ({
       deliveryInfo: shippingInfo,
       parcel: policy.hasDelivery ? parcel : null,
       note,
+      bookingDate: bookingDate ? toDeliveryDate(bookingDate) : null, // [BOOKING]
       paymentMethod: effectiveMethod,
       paymentOff,
       paymentStatus: "PENDING",
@@ -577,8 +579,14 @@ const restoreOrderStock = async (order, userId) => {
 const checkout = async (req, res) => {
   try {
     const userId = getUserId(req);
-    const { cartId, storeIds, deliveryAddress, note, paymentMethod } =
-      cartCheckoutSchema.parse(req.body);
+    const {
+      cartId,
+      storeIds,
+      deliveryAddress,
+      note,
+      bookingDate,
+      paymentMethod,
+    } = cartCheckoutSchema.parse(req.body);
 
     const cart = await CartModel.findOne({ _id: cartId, userId });
     if (!cart) {
@@ -624,6 +632,7 @@ const checkout = async (req, res) => {
           lines,
           deliveryAddress,
           note,
+          bookingDate, // [BOOKING] shob store er order e same booking date
           paymentMethod,
         });
 
@@ -703,6 +712,7 @@ const buyNow = async (req, res) => {
       quantity,
       deliveryAddress,
       note,
+      bookingDate,
       paymentMethod,
     } = directCheckoutSchema.parse(req.body);
 
@@ -723,6 +733,7 @@ const buyNow = async (req, res) => {
       lines: [{ productId, variantId: cleanVariantId(variantId), quantity }],
       deliveryAddress,
       note,
+      bookingDate, // [BOOKING]
       paymentMethod,
     });
 

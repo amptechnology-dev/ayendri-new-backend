@@ -15,6 +15,31 @@ const ORDER_STATUSES = [
 // [PAYMENT] COD ar PayU online
 const PAYMENT_METHODS = ["COD", "ONLINE"];
 
+// ---- Date helpers (YYYY-MM-DD, aajker (IST) ba tar por) ----
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const todayIST = () =>
+  new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+
+const isValidYmd = (v) => {
+  const d = new Date(`${v}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+};
+
+const deliveryDateSchema = z
+  .string()
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Delivery date must be in YYYY-MM-DD format")
+  .refine(isValidYmd, "Invalid delivery date")
+  .refine((v) => v >= todayIST(), "Delivery date cannot be in the past");
+
+// [BOOKING] user er deya booking date (checkout + buy-now dutoi te required)
+const bookingDateSchema = z
+  .string({ required_error: "Booking date is required" })
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Booking date must be in YYYY-MM-DD format")
+  .refine(isValidYmd, "Invalid booking date")
+  .refine((v) => v >= todayIST(), "Booking date cannot be in the past");
+
 const deliveryAddressInputSchema = z.object({
   fullName: z.string().trim().min(1, "Full name is required"),
   phone: z.string().trim().min(10, "Valid phone number is required"),
@@ -32,6 +57,7 @@ const cartCheckoutSchema = z.object({
   storeIds: z.array(objectIdSchema).optional(),
   deliveryAddress: deliveryAddressInputSchema,
   note: z.string().trim().optional(),
+  bookingDate: bookingDateSchema,
   paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
 });
 
@@ -46,27 +72,13 @@ const directCheckoutSchema = z.object({
     .default(1),
   deliveryAddress: deliveryAddressInputSchema,
   note: z.string().trim().optional(),
+  bookingDate: bookingDateSchema,
   paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
 });
 
 const cancelOrderSchema = z.object({
   reason: z.string().trim().optional(),
 });
-
-// ---- Expected delivery date (YYYY-MM-DD, aajker (IST) ba tar por) ----
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-const todayIST = () =>
-  new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
-
-const deliveryDateSchema = z
-  .string()
-  .trim()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, "Delivery date must be in YYYY-MM-DD format")
-  .refine((v) => {
-    const d = new Date(`${v}T00:00:00.000Z`);
-    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
-  }, "Invalid delivery date")
-  .refine((v) => v >= todayIST(), "Delivery date cannot be in the past");
 
 const updateOrderStatusSchema = z.object({
   status: z.enum(ORDER_STATUSES),
