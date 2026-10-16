@@ -40,6 +40,11 @@ const bookingDateSchema = z
   .refine(isValidYmd, "Invalid booking date")
   .refine((v) => v >= todayIST(), "Booking date cannot be in the past");
 
+const optionalBookingDate = z.preprocess(
+  (v) => (v === "" || v === null ? undefined : v),
+  bookingDateSchema.optional(),
+);
+
 const deliveryAddressInputSchema = z.object({
   fullName: z.string().trim().min(1, "Full name is required"),
   phone: z.string().trim().min(10, "Valid phone number is required"),
@@ -76,8 +81,103 @@ const directCheckoutSchema = z.object({
   paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
 });
 
+const REQUEST_TYPES = ["RETURN", "REPLACE", "REFUND"];
+const REASON_CODES = [
+  "SIZE_MISMATCH",
+  "PRODUCT_DAMAGE",
+  "WRONG_PRODUCT",
+  "NOT_AS_DESCRIBED",
+  "QUALITY_ISSUE",
+  "OTHER",
+];
+
+// refund pawar jonno bank account (holder + number + ifsc) ba UPI id
+const bankDetailsSchema = z
+  .object({
+    accountHolder: z
+      .string()
+      .trim()
+      .min(2, "Account holder name is required")
+      .max(80)
+      .optional(),
+    accountNumber: z
+      .string()
+      .trim()
+      .regex(/^\d{9,18}$/, "Enter a valid account number")
+      .optional(),
+    ifsc: z
+      .string()
+      .trim()
+      .toUpperCase()
+      .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Enter a valid IFSC code")
+      .optional(),
+    bankName: z.string().trim().max(80).optional(),
+    upiId: z
+      .string()
+      .trim()
+      .regex(/^[\w.\-]{2,256}@[a-zA-Z]{2,64}$/, "Enter a valid UPI ID")
+      .optional(),
+  })
+  .refine((b) => (b.accountHolder && b.accountNumber && b.ifsc) || b.upiId, {
+    message: "Enter bank account details or a UPI ID",
+  });
+
+// cancel e reason mandatory. Paid order hole bankDetails controller e check hoy
 const cancelOrderSchema = z.object({
-  reason: z.string().trim().optional(),
+  reason: z
+    .string({ required_error: "Cancellation reason is required" })
+    .trim()
+    .min(3, "Cancellation reason must be at least 3 characters")
+    .max(300),
+  bankDetails: bankDetailsSchema.optional(),
+});
+
+// return / replace / refund request (delivered order er item e)
+const createRequestSchema = z
+  .object({
+    itemId: objectIdSchema,
+    type: z.enum(REQUEST_TYPES),
+    reasonCode: z.enum(REASON_CODES, {
+      errorMap: () => ({ message: "Select a reason" }),
+    }),
+    reason: z.string().trim().max(300).optional(),
+    bankDetails: bankDetailsSchema.optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.reasonCode === "OTHER" && (!d.reason || d.reason.length < 3)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["reason"],
+        message: "Please write your reason",
+      });
+    }
+    if (d.type === "REFUND" && !d.bankDetails) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["bankDetails"],
+        message: "Bank details or a UPI ID is required to receive your refund",
+      });
+    }
+  });
+
+const decideRequestSchema = z
+  .object({
+    action: z.enum(["APPROVE", "REJECT"]),
+    note: z.string().trim().max(300).optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.action === "REJECT" && (!d.note || d.note.length < 3)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["note"],
+        message: "Please give a reason for rejecting this request",
+      });
+    }
+  });
+
+const completeRequestSchema = z.object({
+  referenceNo: z.string().trim().max(60).optional(),
+  note: z.string().trim().max(300).optional(),
 });
 
 const updateOrderStatusSchema = z.object({

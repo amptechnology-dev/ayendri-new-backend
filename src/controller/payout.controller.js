@@ -9,6 +9,9 @@ const { PayoutModel, PAYOUT_METHODS } = require("../model/payout.model.js");
 const MAX_LIMIT = 100;
 const EPS = 0.005;
 
+// [REFUND] admin er kache taka ashe ONLINE order e. Paid ba pore full refund hoye REFUNDED, duto-i dhorte hobe
+const COLLECTED_PAYMENT_STATUSES = ["PAID", "REFUNDED"];
+
 const STORE_SHARE = {
   $cond: [
     { $eq: ["$deliveryInfo.source", "SHIPROCKET"] },
@@ -24,6 +27,26 @@ const STORE_SHARE = {
       ],
     },
     "$totalAmount",
+  ],
+};
+
+const REFUNDED_BY_STORE = {
+  $min: [{ $ifNull: ["$refundedAmount", 0] }, "$totalAmount"],
+};
+
+// [REFUND] store er pawna:
+//  - cancelled na hole: normal store share (customer refund store nijer theke dey, tai kata hoy na)
+//  - cancelled hole: store customer ke jototuku ferot diyeche (refundedAmount), toto-i admin store ke ferot dibe
+const RECEIVED_EXPR = {
+  $cond: [{ $ne: ["$status", "CANCELLED"] }, STORE_SHARE, REFUNDED_BY_STORE],
+};
+
+// [REFUND] cancelled order er je taka ekhono customer ke ferot hoyni, seta admin er kache held
+const HELD_EXPR = {
+  $cond: [
+    { $eq: ["$status", "CANCELLED"] },
+    { $max: [0, { $subtract: ["$totalAmount", REFUNDED_BY_STORE] }] },
+    0,
   ],
 };
 
@@ -84,8 +107,9 @@ const parsePaidRange = (from, to) => {
 
 const maxDate = (a, b) => (!a ? b : !b ? a : a > b ? a : b);
 
-// ONLINE + PAID order er taka admin er kache ashe.
-// CANCELLED hole oi taka customer ke refund korte hobe, tai store er pawna na (held).
+// ONLINE order er taka admin er kache ashe (PAID ba full refund hole REFUNDED).
+// CANCELLED hole: store jototuku customer ke refund korechhe toto store er pawna,
+// baki taka customer er refund pending, tai held.
 const fetchTotalRows = async (storeIds) => {
   const [rec, pay] = await Promise.all([
     OrderModel.aggregate([
@@ -93,23 +117,16 @@ const fetchTotalRows = async (storeIds) => {
         $match: {
           storeId: { $in: storeIds },
           paymentMethod: "ONLINE",
-          paymentStatus: "PAID",
+          paymentStatus: { $in: COLLECTED_PAYMENT_STATUSES },
         },
       },
       {
         $group: {
           _id: "$storeId",
-          received: {
-            $sum: {
-              $cond: [{ $ne: ["$status", "CANCELLED"] }, STORE_SHARE, 0],
-            },
-          },
-          held: {
-            $sum: {
-              $cond: [{ $eq: ["$status", "CANCELLED"] }, "$totalAmount", 0],
-            },
-          },
+          received: { $sum: RECEIVED_EXPR },
+          held: { $sum: HELD_EXPR },
           orders: { $sum: 1 },
+          refunded: { $sum: { $ifNull: ["$refundedAmount", 0] } },
           lastReceivedAt: { $max: "$paidAt" },
         },
       },
@@ -140,8 +157,9 @@ const buildSummary = (rec = {}, pay = {}) => {
   return {
     totalReceived,
     onHoldAmount: round2(rec.held),
+    refundedAmount: round2(rec.refunded),
     totalPaidOut,
-    // negative hole admin beshi diye felechhe (pore order cancel hole hote pare)
+    // negative hole admin beshi diye felechhe
     balance: round2(totalReceived - totalPaidOut),
     onlineOrders: rec.orders || 0,
     payoutCount: pay.payoutCount || 0,
@@ -155,7 +173,13 @@ const buildSummary = (rec = {}, pay = {}) => {
 };
 
 const summaryForStores = (maps, ids) => {
-  const rec = { received: 0, held: 0, orders: 0, lastReceivedAt: null };
+  const rec = {
+    received: 0,
+    held: 0,
+    refunded: 0,
+    orders: 0,
+    lastReceivedAt: null,
+  };
   const pay = { paidOut: 0, payoutCount: 0, lastPayoutAt: null };
   ids.forEach((id) => {
     const r = maps.rec.get(String(id));
@@ -163,6 +187,7 @@ const summaryForStores = (maps, ids) => {
     if (r) {
       rec.received += r.received;
       rec.held += r.held;
+      rec.refunded += r.refunded || 0;
       rec.orders += r.orders;
       rec.lastReceivedAt = maxDate(rec.lastReceivedAt, r.lastReceivedAt);
     }
@@ -262,27 +287,16 @@ const getPayoutStores = async (req, res) => {
               $match: {
                 $expr: { $eq: ["$storeId", "$$sid"] },
                 paymentMethod: "ONLINE",
-                paymentStatus: "PAID",
+                paymentStatus: { $in: COLLECTED_PAYMENT_STATUSES },
               },
             },
             {
               $group: {
                 _id: null,
-                received: {
-                  $sum: {
-                    $cond: [{ $ne: ["$status", "CANCELLED"] }, STORE_SHARE, 0],
-                  },
-                },
-                held: {
-                  $sum: {
-                    $cond: [
-                      { $eq: ["$status", "CANCELLED"] },
-                      "$totalAmount",
-                      0,
-                    ],
-                  },
-                },
+                received: { $sum: RECEIVED_EXPR },
+                held: { $sum: HELD_EXPR },
                 orders: { $sum: 1 },
+                refunded: { $sum: { $ifNull: ["$refundedAmount", 0] } },
                 lastReceivedAt: { $max: "$paidAt" },
               },
             },
@@ -317,6 +331,7 @@ const getPayoutStores = async (req, res) => {
         $addFields: {
           received: pick("rec", "received"),
           held: pick("rec", "held"),
+          refunded: pick("rec", "refunded"),
           orders: pick("rec", "orders"),
           lastReceivedAt: pick("rec", "lastReceivedAt", null),
           paidOut: pick("pay", "paidOut"),
@@ -333,6 +348,7 @@ const getPayoutStores = async (req, res) => {
           isVerify: 1,
           received: 1,
           held: 1,
+          refunded: 1,
           orders: 1,
           lastReceivedAt: 1,
           paidOut: 1,
@@ -357,6 +373,7 @@ const getPayoutStores = async (req, res) => {
                 _id: null,
                 received: { $sum: "$received" },
                 held: { $sum: "$held" },
+                refunded: { $sum: "$refunded" },
                 orders: { $sum: "$orders" },
                 lastReceivedAt: { $max: "$lastReceivedAt" },
                 paidOut: { $sum: "$paidOut" },

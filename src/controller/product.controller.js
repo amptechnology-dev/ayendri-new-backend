@@ -46,6 +46,17 @@ const { getDeliverySummary } = require("../helper/deliveryEstimate.js");
 // [GST]
 const { applyGst, withEffectiveGst } = require("../helper/gst.js");
 const shiprocket = require("../helper/shiprocket.js");
+const {
+  parseProductPolicy,
+  getPublicStoreSettings,
+} = require("../helper/productPolicy.js");
+
+const policyErrorResponse = (res, error) =>
+  res.status(400).json({
+    success: false,
+    message: "Validation failed",
+    errors: [error],
+  });
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -382,6 +393,9 @@ const createProduct = async (req, res) => {
     }
     const hsnError = applyHsn(body, data);
     if (hsnError) return hsnErrorResponse(res, hsnError);
+    const policyResult = parseProductPolicy(body);
+    if (policyResult.error) return policyErrorResponse(res, policyResult.error);
+    Object.assign(data, policyResult.policy);
 
     // [STORE TYPE] store type + product er made-for-product flag theke decide hobe ei product e stock thakbe kina
     const businessType = await getStoreBusinessType(parsedData.storeId);
@@ -568,6 +582,13 @@ const getAllProducts = async (req, res) => {
           hasColor: 1,
           hasStockManagement: 1,
           isMadeForProduct: 1, // [STORE TYPE]
+          productType: 1,
+          isReturnable: 1,
+          returnDays: 1,
+          isReplaceable: 1,
+          replaceDays: 1,
+          isRefundable: 1,
+          refundDays: 1,
           minOfferPrice: 1,
           maxOfferPrice: 1,
           deliveryTime: 1,
@@ -917,6 +938,12 @@ const updateProduct = async (req, res) => {
       }
     }
 
+    const policyResult = parseProductPolicy(body, {
+      currentType: existingProduct.productType || "PRODUCT",
+    });
+    if (policyResult.error) return policyErrorResponse(res, policyResult.error);
+    if (policyResult.policy) Object.assign(updateData, policyResult.policy);
+
     // [STOCK] hasStockManagement snapshot create er por kokhono change hobe na
     delete updateData.hasStockManagement;
     // [STORE TYPE] made-for-product flag o create er por change hobe na
@@ -1191,7 +1218,7 @@ const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt";
+  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt productType isReturnable returnDays isReplaceable replaceDays isRefundable refundDays";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -1317,7 +1344,15 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               stock: 1,
               hasVariants: 1,
               hasColor: 1,
+              isMadeForProduct: 1,
               hasStockManagement: 1,
+              productType: 1,
+              isReturnable: 1,
+              returnDays: 1,
+              isReplaceable: 1,
+              replaceDays: 1,
+              isRefundable: 1,
+              refundDays: 1,
               minOfferPrice: 1,
               deliveryTime: 1,
               storeId: 1,
@@ -1341,6 +1376,8 @@ const fetchStoreProducts = async (store, query, categoryId) => {
     pincode: query.pincode,
     country: query.country,
   });
+
+    const storeSettings = await getPublicStoreSettings(store._id);
 
   return {
     page,
@@ -1610,7 +1647,7 @@ const getStoreSingleProduct = async (req, res) => {
     const store = await getPublicStore(storeUniqueId);
     if (!store) return sendStoreUnavailable(res);
 
-    // [GST] "-userId -__v" exclude kore, tai gst gstInclusive automatic ashe
+    // [GST] "-userId -__v" exclude kore, tai gst gstInclusive + policy field automatic ashe
     const product = await ProductModel.findOne({
       _id: productId,
       storeId: store._id,
@@ -1654,7 +1691,7 @@ const getStoreSingleProduct = async (req, res) => {
       },
     ]);
 
-    const [delivery, productDelivery] = await Promise.all([
+    const [delivery, productDelivery, storeSettings] = await Promise.all([
       // related products er jonno (default weight)
       getDeliverySummary({
         storeId: store._id,
@@ -1667,6 +1704,8 @@ const getStoreSingleProduct = async (req, res) => {
         country: req.query.country,
         parcel,
       }),
+      // [SETTINGS] store er payment / delivery / store type setting
+      getPublicStoreSettings(store._id),
     ]);
 
     const relatedProducts = relatedRaw.map((p) => ({
@@ -1680,6 +1719,7 @@ const getStoreSingleProduct = async (req, res) => {
     return res.status(200).json({
       success: true,
       store,
+      storeSettings,
       delivery: productDelivery,
       product: { ...formatProduct(product), delivery: productDelivery },
       relatedProducts,

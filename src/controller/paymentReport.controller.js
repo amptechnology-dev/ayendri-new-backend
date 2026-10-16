@@ -37,6 +37,7 @@ const MONEY_FIELDS = [
   "codDue",
   "onlineDue",
   "refundedAmount",
+  "refundPendingAmount",
   "cancelledAmount",
 ];
 
@@ -161,8 +162,16 @@ const buildMatch = (storeIds, query, extra = {}) => {
 };
 
 // ===================== AGGREGATION CONDITIONS =====================
+const REFUNDED_SO_FAR = { $ifNull: ["$refundedAmount", 0] };
+
 const C = {
-  paid: { $eq: ["$paymentStatus", "PAID"] },
+  // [REFUND] paid + cancelled order e customer taka ferot pabe, tai eta "paid" na
+  paid: {
+    $and: [
+      { $eq: ["$paymentStatus", "PAID"] },
+      { $ne: ["$status", "CANCELLED"] },
+    ],
+  },
   due: {
     $and: [
       { $ne: ["$status", "CANCELLED"] },
@@ -178,6 +187,13 @@ const C = {
     ],
   },
   refunded: { $eq: ["$paymentStatus", "REFUNDED"] },
+  // [REFUND] cancelled order, taka paoa gechhe kintu customer ke puro ferot deya hoyni
+  refundPending: {
+    $and: [
+      { $eq: ["$status", "CANCELLED"] },
+      { $eq: ["$paymentStatus", "PAID"] },
+    ],
+  },
   cancelledUnpaid: {
     $and: [
       { $eq: ["$status", "CANCELLED"] },
@@ -188,22 +204,39 @@ const C = {
   online: { $eq: ["$paymentMethod", "ONLINE"] },
 };
 
+// [REFUND] paid order er net taka (partial refund bad)
+const NET_PAID = {
+  $max: [0, { $subtract: ["$totalAmount", REFUNDED_SO_FAR] }],
+};
+// [REFUND] ashol refund hoya taka (purono REFUNDED order e refundedAmount 0 thakle totalAmount)
+const REFUND_DONE = {
+  $cond: [
+    C.refunded,
+    { $max: ["$totalAmount", REFUNDED_SO_FAR] },
+    { $cond: [{ $in: ["$paymentStatus", ["PAID"]] }, REFUNDED_SO_FAR, 0] },
+  ],
+};
+
 const both = (a, b) => ({ $and: [a, b] });
-const sumIf = (cond) => ({ $sum: { $cond: [cond, "$totalAmount", 0] } });
+const sumOf = (cond, expr) => ({ $sum: { $cond: [cond, expr, 0] } });
+const sumIf = (cond) => sumOf(cond, "$totalAmount");
 const countIf = (cond) => ({ $sum: { $cond: [cond, 1, 0] } });
 
 // $group stage er accumulators (customer / store / overall, shobar jonno same)
 const summaryAcc = () => ({
   totalOrders: { $sum: 1 },
-  paidAmount: sumIf(C.paid),
+  paidAmount: sumOf(C.paid, NET_PAID),
   paidOrders: countIf(C.paid),
   dueAmount: sumIf(C.due),
   dueOrders: countIf(C.due),
-  codPaid: sumIf(both(C.paid, C.cod)),
-  onlinePaid: sumIf(both(C.paid, C.online)),
+  codPaid: sumOf(both(C.paid, C.cod), NET_PAID),
+  onlinePaid: sumOf(both(C.paid, C.online), NET_PAID),
   codDue: sumIf(both(C.due, C.cod)),
   onlineDue: sumIf(both(C.due, C.online)),
-  refundedAmount: sumIf(C.refunded),
+  refundedAmount: { $sum: REFUND_DONE },
+  refundPendingAmount: sumOf(C.refundPending, {
+    $max: [0, { $subtract: ["$totalAmount", REFUNDED_SO_FAR] }],
+  }),
   cancelledAmount: sumIf(C.cancelledUnpaid),
   awaitingQuoteOrders: countIf(C.awaitingQuote),
   lastPaymentAt: { $max: "$paidAt" },
@@ -226,7 +259,18 @@ const isDueOrder = (o) =>
   PRICED_STATUSES.includes(o.priceStatus);
 
 const formatOrderRow = (o) => {
-  const paid = o.paymentStatus === "PAID";
+  const refunded = round2(
+    o.paymentStatus === "REFUNDED"
+      ? Math.max(o.totalAmount || 0, o.refundedAmount || 0)
+      : o.paymentStatus === "PAID"
+        ? o.refundedAmount || 0
+        : 0,
+  );
+  const isPaid = o.paymentStatus === "PAID" && o.status !== "CANCELLED";
+  const refundPending =
+    o.paymentStatus === "PAID" && o.status === "CANCELLED"
+      ? round2(Math.max(0, (o.totalAmount || 0) - (o.refundedAmount || 0)))
+      : 0;
   const populated = o.userId && o.userId.name !== undefined;
   return {
     orderId: o._id,
@@ -248,8 +292,10 @@ const formatOrderRow = (o) => {
     totalAmount: o.totalAmount,
     paymentMethod: o.paymentMethod,
     paymentStatus: o.paymentStatus,
-    paidAmount: paid ? o.totalAmount : 0,
+    paidAmount: isPaid ? round2(Math.max(0, o.totalAmount - (o.refundedAmount || 0))) : 0,
     dueAmount: isDueOrder(o) ? o.totalAmount : 0,
+    refundedAmount: refunded,
+    refundPendingAmount: refundPending,
     paidAt: o.paidAt,
     paymentExpiresAt: o.paymentExpiresAt,
     paymentAttempts: o.paymentAttempts || [],
@@ -257,7 +303,7 @@ const formatOrderRow = (o) => {
 };
 
 const ORDER_ROW_FIELDS =
-  "orderNumber createdAt storeId storeName storeUniqueId userId deliveryAddress status priceStatus totalAmount paymentMethod paymentStatus paidAt paymentExpiresAt paymentAttempts";
+  "orderNumber createdAt storeId storeName storeUniqueId userId deliveryAddress status priceStatus totalAmount refundedAmount paymentMethod paymentStatus paidAt paymentExpiresAt paymentAttempts";
 
 const overallSummary = async (match) => {
   const [row] = await OrderModel.aggregate([
@@ -587,9 +633,10 @@ const getStorePaymentDetail = async (req, res) => {
 
     const [summary, monthly, orders, totalOrders] = await Promise.all([
       overallSummary(match),
-      // mash-wise collection (last 12 month, paidAt onujayi, IST)
+      // mash-wise collection (last 12 month, paidAt onujayi, IST). Cancelled bad, refund kata (net)
       OrderModel.aggregate([
         { $match: { ...match, paymentStatus: "PAID", paidAt: { $ne: null } } },
+        { $match: { status: { $ne: "CANCELLED" } } },
         {
           $group: {
             _id: {
@@ -599,7 +646,7 @@ const getStorePaymentDetail = async (req, res) => {
                 timezone: "Asia/Kolkata",
               },
             },
-            amount: { $sum: "$totalAmount" },
+            amount: { $sum: NET_PAID },
             orders: { $sum: 1 },
           },
         },

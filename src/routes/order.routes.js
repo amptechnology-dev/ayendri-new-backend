@@ -16,8 +16,15 @@ const {
   updateOrderStatus,
   updateDeliveryDate,
   submitQuote,
-  checkoutPreview
+  checkoutPreview,
 } = require("../controller/order.controller.js");
+const {
+  createOrderRequest,
+  getMyRequests,
+  getStoreRequests,
+  decideRequest,
+  completeRequest,
+} = require("../controller/orderRequest.controller.js");
 
 // ---------- USER ----------
 router.post("/checkout", verifyJwt, authorize("USER"), checkout);
@@ -49,6 +56,14 @@ router.post(
   authorize("USER"),
   checkoutPreview,
 );
+// return / replace / refund request
+router.post(
+  "/my-orders/:orderId/requests",
+  verifyJwt,
+  authorize("USER"),
+  createOrderRequest,
+);
+router.get("/my-requests", verifyJwt, authorize("USER"), getMyRequests);
 
 // ---------- STORE ----------
 router.get("/store-orders", verifyJwt, authorize("STORE"), getStoreOrders);
@@ -76,6 +91,26 @@ router.patch(
   verifyJwt,
   authorize("STORE"),
   submitQuote,
+);
+// return / replace / refund requests
+router.get("/store-requests", verifyJwt, authorize("STORE"), getStoreRequests);
+router.patch(
+  "/store-requests/:requestId/decision",
+  verifyJwt,
+  authorize("STORE"),
+  decideRequest,
+);
+router.patch(
+  "/store-requests/:requestId/complete",
+  verifyJwt,
+  authorize("STORE"),
+  completeRequest,
+);
+router.get(
+  "/store-requests",
+  verifyJwt,
+  authorize("STORE", "ADMIN"),
+  getStoreRequests,
 );
 
 module.exports = router;

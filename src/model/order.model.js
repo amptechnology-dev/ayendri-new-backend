@@ -54,6 +54,17 @@ const orderItemSchema = new mongoose.Schema({
   igstAmount: { type: Number, default: 0 },
   gstAmount: { type: Number, default: 0 },
   lineTotalWithGst: { type: Number, default: null },
+  productType: {
+    type: String,
+    enum: ["PRODUCT", "SERVICE"],
+    default: "PRODUCT",
+  },
+  isReturnable: { type: Boolean, default: false },
+  returnDays: { type: Number, default: null },
+  isReplaceable: { type: Boolean, default: false },
+  replaceDays: { type: Number, default: null },
+  isRefundable: { type: Boolean, default: false },
+  refundDays: { type: Number, default: null },
 });
 
 const deliveryAddressSchema = new mongoose.Schema(
@@ -286,6 +297,8 @@ const orderSchema = new mongoose.Schema(
     note: { type: String, default: null },
     note: { type: String, default: null },
     bookingDate: { type: Date, default: null },
+    hasService: { type: Boolean, default: false },
+    refundedAmount: { type: Number, default: 0, min: 0 },
     expectedDeliveryDate: { type: Date, default: null },
     deliveryInfo: { type: deliveryInfoSchema, default: null },
     shippingCharge: { type: Number, default: 0, min: 0 },

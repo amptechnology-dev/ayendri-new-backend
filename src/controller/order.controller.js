@@ -54,6 +54,9 @@ const {
   resolvePaymentForStore,
 } = require("../helper/storePolicy.js");
 const { buildParcel } = require("../helper/shiprocket.js");
+const { OrderRequestModel } = require("../model/orderRequest.model.js");
+const { checkCancelRefund } = require("../helper/orderRefund.js");
+const { snapshotPolicy } = require("../helper/productPolicy.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -225,6 +228,18 @@ const attemptStoreCheckout = async ({
   });
   const productMap = new Map(products.map((p) => [String(p._id), p]));
 
+  const hasService = lines.some(
+    (l) => productMap.get(String(l.productId))?.productType === "SERVICE",
+  );
+  if (hasService && !bookingDate && !dryRun) {
+    return {
+      success: false,
+      storeId,
+      code: "BOOKING_DATE_REQUIRED",
+      message: "Booking date is required for service orders",
+    };
+  }
+
   // [PAYMENT] store er payment mode onujayi payment method thik kora
   const policy = await getStorePolicy(storeId);
   const payment = resolvePaymentForStore(policy, paymentMethod);
@@ -380,7 +395,7 @@ const attemptStoreCheckout = async ({
       weight: source.weight,
       height: source.height,
       priceOnRequest,
-      // [GST] size -> color -> product
+      ...snapshotPolicy(product),
       gstRates: source.gst,
       gstInclusive: source.gstInclusive === true,
       hsnCode: lineHasGst(source.gst) ? product.hsnCode || null : null,
@@ -488,7 +503,9 @@ const attemptStoreCheckout = async ({
       deliveryInfo: shippingInfo,
       parcel: policy.hasDelivery ? parcel : null,
       note,
-      bookingDate: bookingDate ? toDeliveryDate(bookingDate) : null, // [BOOKING]
+      hasService,
+      bookingDate:
+        hasService && bookingDate ? toDeliveryDate(bookingDate) : null,
       paymentMethod: effectiveMethod,
       paymentOff,
       paymentStatus: "PENDING",
@@ -902,8 +919,6 @@ const getMyOrderById = async (req, res) => {
   }
 };
 
-// ===================== 6. CANCEL ORDER (user side) — stock restore hoy =====================
-// PATCH /api/order/my-orders/:orderId/cancel   body: { reason? }
 const cancelMyOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -915,11 +930,10 @@ const cancelMyOrder = async (req, res) => {
         .json({ success: false, message: "Invalid order id" });
     }
 
-    const { reason } = cancelOrderSchema.parse(req.body);
+    // reason mandatory, paid order hole bankDetails o lagbe
+    const { reason, bankDetails } = cancelOrderSchema.parse(req.body || {});
 
-    const existing = await OrderModel.findOne({ _id: orderId, userId })
-      .select("status paymentStatus")
-      .lean();
+    const existing = await OrderModel.findOne({ _id: orderId, userId }).lean();
     if (!existing) {
       return res
         .status(404)
@@ -933,24 +947,40 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // [PAYMENT] online paid order cancel korle refund lagbe, refund flow na thaka porjonto block
-    if (existing.paymentStatus === "PAID") {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Paid order cannot be cancelled online. Contact the store for refund.",
-      });
+    // [REFUND] paid order: sob item refundable + (service hole) booking date er age hole-i cancel + refund
+    const wasPaid = existing.paymentStatus === "PAID";
+    if (wasPaid) {
+      const check = checkCancelRefund(existing);
+      if (!check.ok) {
+        return res.status(400).json({ success: false, message: check.message });
+      }
+      if (!bankDetails) {
+        return res.status(400).json({
+          success: false,
+          message: "Validation failed",
+          errors: [
+            {
+              field: "bankDetails",
+              message:
+                "Bank details or a UPI ID is required to receive your refund",
+            },
+          ],
+        });
+      }
     }
 
-    // atomic claim: ekta request-i jitbe, tai stock ekbar-i restore hobe
-    // [PAYMENT] filter e paymentStatus: $ne PAID, jeno ei majhe payment complete hole cancel na hoy
+    // atomic claim: ekta request-i jitbe, tai stock ekbar-i restore hobe.
+    // paymentStatus filter e race guard (ei majhe payment status bodle gele cancel hobe na)
     const order = await transitionOrder({
       orderId,
-      filter: { userId, paymentStatus: { $ne: "PAID" } },
+      filter: {
+        userId,
+        paymentStatus: wasPaid ? "PAID" : { $ne: "PAID" },
+      },
       status: "CANCELLED",
       note: reason,
       userId,
-      extra: { cancelReason: reason || null, cancelledBy: "USER" },
+      extra: { cancelReason: reason, cancelledBy: "USER" },
     });
 
     if (!order) {
@@ -960,14 +990,40 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
+    // [REFUND] paid order cancel hole refund request auto approved, store taka pathiye complete korbe
+    let refundRequest = null;
+    if (wasPaid) {
+      refundRequest = await OrderRequestModel.create({
+        orderId: order._id,
+        orderNumber: order.orderNumber,
+        itemId: null,
+        itemName: `Order ${order.orderNumber}`,
+        quantity: order.totalItems,
+        userId,
+        storeId: order.storeId,
+        type: "REFUND",
+        source: "ORDER_CANCEL",
+        reasonCode: "ORDER_CANCELLED",
+        reason,
+        status: "APPROVED",
+        decidedAt: new Date(),
+        storeNote: "Refund approved automatically because the order was cancelled",
+        refundAmount: order.totalAmount,
+        bankDetails,
+      });
+    }
+
     notifyOrderCancelled(order);
     notifyUserOrderStatus(order);
     await restoreOrderStock(order, userId);
 
     return res.status(200).json({
       success: true,
-      message: "Order cancelled and stock restored",
+      message: wasPaid
+        ? "Order cancelled. Your refund will be sent to your bank account by the store"
+        : "Order cancelled and stock restored",
       order,
+      refundRequestId: refundRequest?._id || null,
     });
   } catch (error) {
     return handleError(res, error, "Cancel My Order Error");
