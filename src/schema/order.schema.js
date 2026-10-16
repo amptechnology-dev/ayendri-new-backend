@@ -32,9 +32,8 @@ const deliveryDateSchema = z
   .refine(isValidYmd, "Invalid delivery date")
   .refine((v) => v >= todayIST(), "Delivery date cannot be in the past");
 
-// [BOOKING] user er deya booking date (checkout + buy-now dutoi te required)
 const bookingDateSchema = z
-  .string({ required_error: "Booking date is required" })
+  .string()
   .trim()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Booking date must be in YYYY-MM-DD format")
   .refine(isValidYmd, "Invalid booking date")
@@ -62,7 +61,7 @@ const cartCheckoutSchema = z.object({
   storeIds: z.array(objectIdSchema).optional(),
   deliveryAddress: deliveryAddressInputSchema,
   note: z.string().trim().optional(),
-  bookingDate: bookingDateSchema,
+  bookingDate: optionalBookingDate, // [BOOKING] optional
   paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
 });
 
@@ -77,7 +76,7 @@ const directCheckoutSchema = z.object({
     .default(1),
   deliveryAddress: deliveryAddressInputSchema,
   note: z.string().trim().optional(),
-  bookingDate: bookingDateSchema,
+  bookingDate: optionalBookingDate, // [BOOKING] optional
   paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
 });
 

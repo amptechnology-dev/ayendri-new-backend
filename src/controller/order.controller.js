@@ -231,15 +231,6 @@ const attemptStoreCheckout = async ({
   const hasService = lines.some(
     (l) => productMap.get(String(l.productId))?.productType === "SERVICE",
   );
-  if (hasService && !bookingDate && !dryRun) {
-    return {
-      success: false,
-      storeId,
-      code: "BOOKING_DATE_REQUIRED",
-      message: "Booking date is required for service orders",
-    };
-  }
-
   // [PAYMENT] store er payment mode onujayi payment method thik kora
   const policy = await getStorePolicy(storeId);
   const payment = resolvePaymentForStore(policy, paymentMethod);
@@ -1007,7 +998,8 @@ const cancelMyOrder = async (req, res) => {
         reason,
         status: "APPROVED",
         decidedAt: new Date(),
-        storeNote: "Refund approved automatically because the order was cancelled",
+        storeNote:
+          "Refund approved automatically because the order was cancelled",
         refundAmount: order.totalAmount,
         bankDetails,
       });

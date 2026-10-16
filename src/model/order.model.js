@@ -295,7 +295,6 @@ const orderSchema = new mongoose.Schema(
 
     deliveryAddress: { type: deliveryAddressSchema, required: true },
     note: { type: String, default: null },
-    note: { type: String, default: null },
     bookingDate: { type: Date, default: null },
     hasService: { type: Boolean, default: false },
     refundedAmount: { type: Number, default: 0, min: 0 },
