@@ -60,8 +60,6 @@ const getRole = async (req) => {
   return user?.role || null;
 };
 
-// ===================== USER: RAISE RETURN / REPLACE / REFUND =====================
-// POST /api/order/my-orders/:orderId/requests
 const createOrderRequest = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -128,9 +126,19 @@ const createOrderRequest = async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "Your request has been sent to the store",
-      request: { ...request.toObject(), bankDetails: maskBank(request.bankDetails) },
+      request: {
+        ...request.toObject(),
+        bankDetails: maskBank(request.bankDetails),
+      },
     });
   } catch (error) {
+    // unique index e atkale (duto request ekshathe ashle)
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "A request for this item already exists",
+      });
+    }
     return handleError(res, error, "Create Order Request Error");
   }
 };
@@ -170,7 +178,10 @@ const getMyRequests = async (req, res) => {
       limit: limitNum,
       total,
       totalPages: Math.ceil(total / limitNum),
-      requests: requests.map((r) => ({ ...r, bankDetails: maskBank(r.bankDetails) })),
+      requests: requests.map((r) => ({
+        ...r,
+        bankDetails: maskBank(r.bankDetails),
+      })),
     });
   } catch (error) {
     return handleError(res, error, "Get My Requests Error");
@@ -313,8 +324,6 @@ const decideRequest = async (req, res) => {
   }
 };
 
-// ===================== STORE: MARK COMPLETED (refund paid / returned / replaced) =====================
-// PATCH /api/order/store-requests/:requestId/complete   body: { referenceNo?, note? }
 const completeRequest = async (req, res) => {
   try {
     const { requestId } = req.params;
@@ -378,21 +387,23 @@ const completeRequest = async (req, res) => {
       });
     }
 
-    // refund hole order er refundedAmount barbe, puro taka ferot hole REFUNDED
     if (request.type === "REFUND" && request.refundAmount > 0) {
       const order = await OrderModel.findByIdAndUpdate(
         request.orderId,
         { $inc: { refundedAmount: request.refundAmount } },
         { new: true },
       )
-        .select("refundedAmount totalAmount")
+        .select("refundedAmount totalAmount itemsTotal")
         .lean();
 
-      if (order && order.refundedAmount + 0.005 >= order.totalAmount) {
-        await OrderModel.updateOne(
-          { _id: order._id },
-          { $set: { paymentStatus: "REFUNDED" } },
-        );
+      if (order) {
+        const refundableTotal = order.itemsTotal ?? order.totalAmount;
+        if (order.refundedAmount + 0.005 >= refundableTotal) {
+          await OrderModel.updateOne(
+            { _id: order._id },
+            { $set: { paymentStatus: "REFUNDED" } },
+          );
+        }
       }
     }
 

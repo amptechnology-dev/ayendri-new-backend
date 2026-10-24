@@ -92,8 +92,6 @@ router.patch(
   authorize("STORE"),
   submitQuote,
 );
-// return / replace / refund requests
-router.get("/store-requests", verifyJwt, authorize("STORE"), getStoreRequests);
 router.patch(
   "/store-requests/:requestId/decision",
   verifyJwt,

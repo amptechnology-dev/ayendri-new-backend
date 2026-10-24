@@ -229,4 +229,7 @@ module.exports = {
   submitQuoteSchema,
   respondQuoteSchema,
   initiatePaymentSchema,
+  createRequestSchema,
+  decideRequestSchema,
+  completeRequestSchema,
 };

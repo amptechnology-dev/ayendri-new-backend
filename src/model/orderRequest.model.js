@@ -72,6 +72,17 @@ orderRequestSchema.index({ storeId: 1, status: 1, createdAt: -1 });
 orderRequestSchema.index({ userId: 1, createdAt: -1 });
 orderRequestSchema.index({ orderId: 1, itemId: 1, status: 1 });
 
+orderRequestSchema.index(
+  { orderId: 1, itemId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: {
+      status: { $in: ["REQUESTED", "APPROVED", "COMPLETED"] },
+      itemId: { $type: "objectId" },
+    },
+  },
+);
+
 orderRequestSchema.pre("save", async function () {
   if (this.isNew && !this.requestNumber) {
     const seq = await getNextSequence("requestNumber");
