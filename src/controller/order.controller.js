@@ -13,8 +13,8 @@ const {
   updateDeliveryDateSchema,
   submitQuoteSchema,
   respondQuoteSchema,
-  shippingOptionsQuerySchema, // [নতুন]
-  selectShippingOptionSchema, // [নতুন]
+  shippingOptionsQuerySchema,
+  selectShippingOptionSchema,
 } = require("../schema/order.schema.js");
 const { resolveLineSource } = require("../helper/resolveVariant.js");
 const {
@@ -100,6 +100,7 @@ const toDeliveryDate = (str) => new Date(`${str}T00:00:00.000Z`);
 const getUserId = (req) => req.user?._id || req.user?.id;
 const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const toBool = (v) => String(v).trim().toLowerCase() === "true";
 
 // "null" / "undefined" / "" string ke real null banay
 const cleanVariantId = (id) => {
@@ -257,6 +258,9 @@ const attemptStoreCheckout = async ({
   const paymentOff = payment.paymentOff;
 
   const parcel = linesParcel(lines, productMap);
+  const wantsFastest = lines.some(
+    (l) => productMap.get(String(l.productId))?.fastestDelivery === true,
+  );
   const delivery = await checkStoreDelivery({
     storeId,
     pincode: deliveryAddress?.pincode,
@@ -264,6 +268,7 @@ const attemptStoreCheckout = async ({
     parcel,
     cod: effectiveMethod === "COD" && !paymentOff,
     policy,
+    fastest: wantsFastest,
   });
   if (!delivery.deliverable) {
     return {
@@ -2108,7 +2113,11 @@ const selectShippingOption = async (req, res) => {
     }
 
     const modeLabel =
-      chosen.mode === "AIR" ? "Air" : chosen.mode === "SURFACE" ? "Surface" : null;
+      chosen.mode === "AIR"
+        ? "Air"
+        : chosen.mode === "SURFACE"
+          ? "Surface"
+          : null;
 
     return res.status(200).json({
       success: true,
@@ -2136,6 +2145,6 @@ module.exports = {
   submitQuote,
   restoreOrderStock,
   checkoutPreview,
-  getShippingOptions, 
+  getShippingOptions,
   selectShippingOption,
 };

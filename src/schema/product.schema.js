@@ -45,7 +45,7 @@ const createProductSchema = z.object({
   gst: gstSchema,
   gstInclusive: boolish,
   hsnCode: z.string().trim().optional(),
-
+  fastestDelivery: boolish,
   // product type + return / replace / refund policy
   productType: z.enum(["PRODUCT", "SERVICE"]).optional(),
   isReturnable: boolish,

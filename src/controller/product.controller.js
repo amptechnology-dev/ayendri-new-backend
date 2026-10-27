@@ -59,6 +59,7 @@ const policyErrorResponse = (res, error) =>
   });
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const toBool = (v) => String(v).trim().toLowerCase() === "true";
 
 // [STOCK] stock management off hole stock field gulo shob level e 0 thakbe
 const zeroStock = (obj) => {
@@ -396,6 +397,9 @@ const createProduct = async (req, res) => {
     const policyResult = parseProductPolicy(body);
     if (policyResult.error) return policyErrorResponse(res, policyResult.error);
     Object.assign(data, policyResult.policy);
+    const createType = body.productType === "SERVICE" ? "SERVICE" : "PRODUCT";
+    data.fastestDelivery =
+      data.productType !== "SERVICE" && toBool(body.fastestDelivery);
 
     // [STORE TYPE] store type + product er made-for-product flag theke decide hobe ei product e stock thakbe kina
     const businessType = await getStoreBusinessType(parsedData.storeId);
@@ -581,8 +585,9 @@ const getAllProducts = async (req, res) => {
           hasVariants: 1,
           hasColor: 1,
           hasStockManagement: 1,
-          isMadeForProduct: 1, // [STORE TYPE]
+          isMadeForProduct: 1, 
           productType: 1,
+          fastestDelivery: 1,
           isReturnable: 1,
           returnDays: 1,
           isReplaceable: 1,
@@ -943,6 +948,12 @@ const updateProduct = async (req, res) => {
     });
     if (policyResult.error) return policyErrorResponse(res, policyResult.error);
     if (policyResult.policy) Object.assign(updateData, policyResult.policy);
+    if (body.fastestDelivery !== undefined) {
+      updateData.fastestDelivery = toBool(body.fastestDelivery);
+    }
+    const finalType =
+      updateData.productType || existingProduct.productType || "PRODUCT";
+    if (finalType === "SERVICE") updateData.fastestDelivery = false;
 
     // [STOCK] hasStockManagement snapshot create er por kokhono change hobe na
     delete updateData.hasStockManagement;
@@ -1218,7 +1229,7 @@ const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt productType isReturnable returnDays isReplaceable replaceDays isRefundable refundDays";
+  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt productType fastestDelivery isReturnable returnDays isReplaceable replaceDays isRefundable refundDays";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -1259,6 +1270,15 @@ const formatProduct = ({ categoryId, ...product }) => ({
   minTierPrice: getMinTierPrice(product),
   priceOnRequest: isPriceOnRequestProduct(product),
 });
+
+const buildDeliveryPicker = async ({ storeId, pincode, country, products }) => {
+  const base = await getDeliverySummary({ storeId, pincode, country });
+  const hasFast = products.some((p) => p.fastestDelivery);
+  const fast = hasFast
+    ? await getDeliverySummary({ storeId, pincode, country, fastest: true })
+    : base;
+  return { base, pick: (p) => (p?.fastestDelivery ? fast : base) };
+};
 
 const fetchStoreProducts = async (store, query, categoryId) => {
   const { page, limit, skip } = getPagination(query);
@@ -1347,6 +1367,7 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               isMadeForProduct: 1,
               hasStockManagement: 1,
               productType: 1,
+              fastestDelivery: 1, // [FAST]
               isReturnable: 1,
               returnDays: 1,
               isReplaceable: 1,
@@ -1371,13 +1392,15 @@ const fetchStoreProducts = async (store, query, categoryId) => {
   const totalProducts = result?.totalCount?.[0]?.count || 0;
   const totalPages = Math.ceil(totalProducts / limit);
 
-  const delivery = await getDeliverySummary({
+  // [FAST] normal + (dorkar hole) fastest delivery
+  const { base: delivery, pick } = await buildDeliveryPicker({
     storeId: store._id,
     pincode: query.pincode,
     country: query.country,
+    products,
   });
 
-    const storeSettings = await getPublicStoreSettings(store._id);
+  const storeSettings = await getPublicStoreSettings(store._id);
 
   return {
     page,
@@ -1387,7 +1410,7 @@ const fetchStoreProducts = async (store, query, categoryId) => {
     hasNextPage: page < totalPages,
     hasPrevPage: page > 1,
     delivery,
-    products: products.map((p) => ({ ...formatProduct(p), delivery })),
+    products: products.map((p) => ({ ...formatProduct(p), delivery: pick(p) })),
   };
 };
 
@@ -1495,7 +1518,7 @@ const getStoreProducts = async (req, res) => {
       match.$or = [{ name: regex }, { productCode: regex }];
     }
 
-    // [GST] PRODUCT_LIST_FIELDS e already gst gstInclusive ache
+    // [GST] [FAST] PRODUCT_LIST_FIELDS e gst, gstInclusive, fastestDelivery ache
     let products = await ProductModel.find(match)
       .select(
         `${PRODUCT_LIST_FIELDS} stock hasVariants hasColor hasStockManagement reviews averageRating totalReviews`,
@@ -1540,10 +1563,12 @@ const getStoreProducts = async (req, res) => {
       });
     }
 
-    const delivery = await getDeliverySummary({
+    // [FAST] normal + (dorkar hole) fastest delivery
+    const { base: delivery, pick } = await buildDeliveryPicker({
       storeId: store._id,
       pincode: req.query.pincode,
       country: req.query.country,
+      products,
     });
 
     products = products.map((p) => {
@@ -1561,7 +1586,7 @@ const getStoreProducts = async (req, res) => {
         minOfferPrice,
         reviews,
         maxReview,
-        delivery,
+        delivery: pick(p), // [FAST]
       };
     });
 
@@ -1647,7 +1672,7 @@ const getStoreSingleProduct = async (req, res) => {
     const store = await getPublicStore(storeUniqueId);
     if (!store) return sendStoreUnavailable(res);
 
-    // [GST] "-userId -__v" exclude kore, tai gst gstInclusive + policy field automatic ashe
+    // "-userId -__v" exclude kore, tai gst, gstInclusive, fastestDelivery + policy field automatic ashe
     const product = await ProductModel.findOne({
       _id: productId,
       storeId: store._id,
@@ -1691,20 +1716,22 @@ const getStoreSingleProduct = async (req, res) => {
       },
     ]);
 
-    const [delivery, productDelivery, storeSettings] = await Promise.all([
-      // related products er jonno (default weight)
-      getDeliverySummary({
+    const [related, productDelivery, storeSettings] = await Promise.all([
+      // related products er jonno (default weight), [FAST] proti product er flag onujayi
+      buildDeliveryPicker({
         storeId: store._id,
         pincode: req.query.pincode,
         country: req.query.country,
+        products: relatedRaw,
       }),
+      // [FAST] ei product e fastestDelivery on thakle fastest courier
       getDeliverySummary({
         storeId: store._id,
         pincode: req.query.pincode,
         country: req.query.country,
         parcel,
+        fastest: product.fastestDelivery === true,
       }),
-      // [SETTINGS] store er payment / delivery / store type setting
       getPublicStoreSettings(store._id),
     ]);
 
@@ -1713,7 +1740,7 @@ const getStoreSingleProduct = async (req, res) => {
         ...p,
         categoryId: categoryId ? { _id: categoryId } : null,
       }),
-      delivery,
+      delivery: related.pick(p),
     }));
 
     return res.status(200).json({

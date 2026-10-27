@@ -165,6 +165,7 @@ const productSchema = new mongoose.Schema(
       default: "PRODUCT",
       index: true,
     },
+    fastestDelivery: { type: Boolean, default: false },
     isReturnable: { type: Boolean, default: false },
     returnDays: { type: Number, default: null, min: 1 },
     isReplaceable: { type: Boolean, default: false },

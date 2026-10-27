@@ -157,10 +157,9 @@ const etaDaysOf = (c) => {
     if (Number.isFinite(t))
       return Math.max(0, Math.ceil((t - Date.now()) / 86400000));
   }
-  return null; // ETA jana nei, caller manual days use korbe
+  return null; 
 };
 
-// [নতুন] is_surface theke Air / Surface. Field na thakle null (jana nei)
 const modeOf = (c) => {
   if (c.is_surface === undefined || c.is_surface === null) return null;
   return c.is_surface === true || Number(c.is_surface) === 1 ? "SURFACE" : "AIR";
@@ -178,9 +177,9 @@ const normalizeServiceability = (data, cod) => {
       etd: c.etd || null,
       cod: Number(c.cod) === 1,
       rating: Number(c.rating) || null,
-      mode: modeOf(c), // [নতুন] "AIR" | "SURFACE" | null
+      mode: modeOf(c), 
     }))
-    .filter((c) => Number.isFinite(c.rate)); // ETA na thakleo courier bad jabe na
+    .filter((c) => Number.isFinite(c.rate)); 
 
   if (cod && list.some((c) => c.cod !== undefined)) {
     couriers = couriers.filter((c) => c.cod);
@@ -258,7 +257,6 @@ const checkServiceability = async ({
   return value;
 };
 
-// desher naam -> ISO code (2 okkhorer code dile seta-i use hoy). Shiprocket er supported 44 desh er sathe mil rakho
 const COUNTRY_CODES = {
   "united states": "US",
   usa: "US",

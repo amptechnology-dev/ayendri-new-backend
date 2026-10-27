@@ -176,7 +176,15 @@ const resolveLocal = ({ cfg, distanceKm, handlingMin, pin }) => {
 };
 
 // ---------- NATIONAL: Shiprocket thakle courier er asol ETA + rate, nahole manual ----------
-const resolveNational = async ({ cfg, pin, handlingMin, weightKg, parcel, cod }) => {
+const resolveNational = async ({
+  cfg,
+  pin,
+  handlingMin,
+  weightKg,
+  parcel,
+  cod,
+  fastest = false,
+}) => {
   if (shiprocket.isAvailable()) {
     try {
       const svc = await shiprocket.checkServiceability({
@@ -191,23 +199,31 @@ const resolveNational = async ({ cfg, pin, handlingMin, weightKg, parcel, cod })
 
       const fastDays = etaOf(svc.fastest, cfg.nationalMinDays || 0);
       const cheapDays = etaOf(svc.cheapest, cfg.nationalMaxDays || 0);
+      const chosen = fastest ? svc.fastest : svc.cheapest;
+
       const minMin = handlingMin + fastDays * 1440;
-      const maxMin = Math.max(minMin, handlingMin + cheapDays * 1440);
-      const rate = round2(svc.cheapest.rate);
+      const maxMin = fastest
+        ? minMin
+        : Math.max(minMin, handlingMin + cheapDays * 1440);
+      const rate = round2(chosen.rate);
 
       return {
         serviceable: true,
         info: buildInfo("NATIONAL", null, minMin, maxMin, {
           source: "SHIPROCKET",
-          courierId: svc.cheapest.id,
-          courierName: svc.cheapest.name,
+          courierId: chosen.id,
+          courierName: chosen.name,
           courierRate: rate,
-          courierEtaDays: Number.isFinite(svc.cheapest.etaDays)
-            ? svc.cheapest.etaDays
+          courierEtaDays: Number.isFinite(chosen.etaDays)
+            ? chosen.etaDays
             : null,
+          courierMode: chosen.mode ?? null,
+          fastestDelivery: fastest,
           chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
           shippingCharge: rate,
-          shippingNote: `Courier (${svc.cheapest.name}) to ${pin}`,
+          shippingNote: fastest
+            ? `Fastest courier (${chosen.name}) to ${pin}`
+            : `Courier (${chosen.name}) to ${pin}`,
           pincode: pin,
         }),
       };
@@ -219,20 +235,21 @@ const resolveNational = async ({ cfg, pin, handlingMin, weightKg, parcel, cod })
     }
   }
 
+  // manual fallback: fastest hole shudhu min din
+  const manualMin = handlingMin + (cfg.nationalMinDays || 0) * 1440;
+  const manualMax = fastest
+    ? manualMin
+    : handlingMin + (cfg.nationalMaxDays || 0) * 1440;
+
   return {
     serviceable: true,
-    info: buildInfo(
-      "NATIONAL",
-      null,
-      handlingMin + (cfg.nationalMinDays || 0) * 1440,
-      handlingMin + (cfg.nationalMaxDays || 0) * 1440,
-      {
-        shippingCharge: round2(cfg.nationalFallbackCharge),
-        shippingNote: `Courier delivery to ${pin}`,
-        chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
-        pincode: pin,
-      },
-    ),
+    info: buildInfo("NATIONAL", null, manualMin, manualMax, {
+      fastestDelivery: fastest,
+      shippingCharge: round2(cfg.nationalFallbackCharge),
+      shippingNote: `Courier delivery to ${pin}`,
+      chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
+      pincode: pin,
+    }),
   };
 };
 
@@ -245,11 +262,14 @@ const resolveInternational = async ({
   handlingMin,
   weightKg,
   parcel,
+  fastest = false,
 }) => {
   const countryCode = shiprocket.toCountryCode(country);
 
   if (shiprocket.isAvailable() && !countryCode) {
-    console.warn(`[Delivery] No ISO code mapped for country "${country}", using manual estimate`);
+    console.warn(
+      `[Delivery] No ISO code mapped for country "${country}", using manual estimate`,
+    );
   }
 
   if (shiprocket.isAvailable() && countryCode) {
@@ -264,18 +284,24 @@ const resolveInternational = async ({
       if (svc.serviceable) {
         const fastDays = etaOf(svc.fastest, cfg.internationalMinDays ?? 7);
         const cheapDays = etaOf(svc.cheapest, cfg.internationalMaxDays ?? 14);
+        const chosen = fastest ? svc.fastest : svc.cheapest;
+
         const minMin = handlingMin + fastDays * 1440;
-        const maxMin = Math.max(minMin, handlingMin + cheapDays * 1440);
-        const rate = round2(svc.cheapest.rate);
+        const maxMin = fastest
+          ? minMin
+          : Math.max(minMin, handlingMin + cheapDays * 1440);
+        const rate = round2(chosen.rate);
 
         return buildInfo("INTERNATIONAL", null, minMin, maxMin, {
           source: "SHIPROCKET",
-          courierId: svc.cheapest.id,
-          courierName: svc.cheapest.name,
+          courierId: chosen.id,
+          courierName: chosen.name,
           courierRate: rate,
-          courierEtaDays: Number.isFinite(svc.cheapest.etaDays)
-            ? svc.cheapest.etaDays
+          courierEtaDays: Number.isFinite(chosen.etaDays)
+            ? chosen.etaDays
             : null,
+          courierMode: chosen.mode ?? null,
+          fastestDelivery: fastest,
           chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
           shippingCharge: rate,
           shippingNote: `International courier to ${country}`,
@@ -284,23 +310,26 @@ const resolveInternational = async ({
         });
       }
     } catch (err) {
-      console.error("International estimate failed, using manual:", err.message);
+      console.error(
+        "International estimate failed, using manual:",
+        err.message,
+      );
     }
   }
 
-  return buildInfo(
-    "INTERNATIONAL",
-    null,
-    handlingMin + (cfg.internationalMinDays ?? 7) * 1440,
-    handlingMin + (cfg.internationalMaxDays ?? 14) * 1440,
-    {
-      shippingCharge: round2(cfg.internationalFallbackCharge),
-      shippingNote: `International shipping to ${country}`,
-      chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
-      country,
-      pincode: pin,
-    },
-  );
+  const manualMin = handlingMin + (cfg.internationalMinDays ?? 7) * 1440;
+  const manualMax = fastest
+    ? manualMin
+    : handlingMin + (cfg.internationalMaxDays ?? 14) * 1440;
+
+  return buildInfo("INTERNATIONAL", null, manualMin, manualMax, {
+    fastestDelivery: fastest,
+    shippingCharge: round2(cfg.internationalFallbackCharge),
+    shippingNote: `International shipping to ${country}`,
+    chargeableWeightKg: parcel?.chargeableWeight ?? weightKg ?? null,
+    country,
+    pincode: pin,
+  });
 };
 
 // ---------- ORDER VALUE RULES ----------
@@ -373,6 +402,7 @@ const checkStoreDelivery = async ({
   parcel, // shiprocket.buildParcel() er result (dile weight + dimension dhore)
   cod = false,
   policy,
+  fastest = false,
 }) => {
   const pol = policy || (await getStorePolicy(storeId));
 
@@ -389,7 +419,8 @@ const checkStoreDelivery = async ({
 
   const pin = String(pincode || "").trim();
   const handlingMin = getHandlingMinutes(cfg);
-  const allowLocal = cfg.deliveryType === "LOCAL" || cfg.deliveryType === "BOTH";
+  const allowLocal =
+    cfg.deliveryType === "LOCAL" || cfg.deliveryType === "BOTH";
   const allowNational =
     cfg.deliveryType === "NATIONAL" || cfg.deliveryType === "BOTH";
   const weight = parcel?.weight ?? weightKg;
@@ -417,6 +448,7 @@ const checkStoreDelivery = async ({
       handlingMin,
       weightKg: weight,
       parcel,
+      fastest,
     });
     return { deliverable: true, configured: true, info, chargeRules: [] };
   }
@@ -464,6 +496,7 @@ const checkStoreDelivery = async ({
       weightKg: weight,
       parcel,
       cod,
+      fastest,
     });
 
     if (!national.serviceable) {
@@ -494,6 +527,7 @@ const getDeliverySummary = async ({
   country,
   itemsTotal = null,
   parcel = null, // product detail e dile oi product er weight/size dhore estimate
+  fastest = false,
 }) => {
   const pin = String(pincode || "").trim();
   if (!pin) return null;
@@ -507,6 +541,7 @@ const getDeliverySummary = async ({
     country,
     parcel,
     policy,
+    fastest,
   });
   if (!result.configured) return null;
 
@@ -527,6 +562,7 @@ const getDeliverySummary = async ({
       shippingNote: null,
       courierName: null,
       chargeableWeightKg: null,
+      fastest: false,
       label: result.message,
     };
   }
@@ -557,6 +593,7 @@ const getDeliverySummary = async ({
     shippingNote: info.shippingNote,
     courierName: info.courierName ?? null,
     chargeableWeightKg: info.chargeableWeightKg ?? null,
+    fastest: !!info.fastestDelivery,
     label: info.etaLabel,
   };
 };
