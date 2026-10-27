@@ -3,6 +3,8 @@ const CartModel = require("../model/cart.model.js");
 const OrderModel = require("../model/order.model.js");
 const ProductModel = require("../model/product.model.js");
 const StoreModel = require("../model/store.model.js");
+// [নতুন] pickup pincode + handling time ekhane thake
+const StoreDeliveryModel = require("../model/storeDelivery.model.js");
 const {
   cartCheckoutSchema,
   directCheckoutSchema,
@@ -11,6 +13,8 @@ const {
   updateDeliveryDateSchema,
   submitQuoteSchema,
   respondQuoteSchema,
+  shippingOptionsQuerySchema, // [নতুন]
+  selectShippingOptionSchema, // [নতুন]
 } = require("../schema/order.schema.js");
 const { resolveLineSource } = require("../helper/resolveVariant.js");
 const {
@@ -48,12 +52,19 @@ const {
 } = require("../helper/deliveryEstimate.js");
 // [GST]
 const { getGstMode, applyGstToItem } = require("../helper/gst.js");
-const { calcWeightKg } = require("../helper/shiprocket.js");
+// [নতুন] checkServiceability, checkInternationalServiceability, toCountryCode, isAvailable
+const {
+  calcWeightKg,
+  buildParcel,
+  checkServiceability,
+  checkInternationalServiceability,
+  toCountryCode,
+  isAvailable: isShiprocketAvailable,
+} = require("../helper/shiprocket.js");
 const {
   getStorePolicy,
   resolvePaymentForStore,
 } = require("../helper/storePolicy.js");
-const { buildParcel } = require("../helper/shiprocket.js");
 const { OrderRequestModel } = require("../model/orderRequest.model.js");
 const { checkCancelRefund } = require("../helper/orderRefund.js");
 const { snapshotPolicy } = require("../helper/productPolicy.js");
@@ -1824,6 +1835,291 @@ const checkoutPreview = async (req, res) => {
   }
 };
 
+// =====================================================================
+// [নতুন] STORE: DELIVERY SPEED / COURIER SELECT
+// =====================================================================
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const SHIPPABLE_STATUSES = ["PENDING", "CONFIRMED"];
+
+// pickup pincode + handling time deliveryEstimate.js er moto StoreDelivery theke
+const getStoreDeliveryCfg = (storeId) =>
+  StoreDeliveryModel.findOne({ storeId, isActive: true })
+    .select("pincode handlingMinutes handlingDays")
+    .lean();
+
+// deliveryEstimate.js er getHandlingMinutes er hubohu ek niyom
+const handlingMinutesOf = (cfg) =>
+  typeof cfg?.handlingMinutes === "number"
+    ? cfg.handlingMinutes
+    : (cfg?.handlingDays || 0) * 1440;
+
+// ekhon (IST) theke n minute pore, "YYYY-MM-DD"
+const ymdAfterMinutesIST = (minutes) =>
+  new Date(Date.now() + IST_OFFSET_MS + minutes * 60000)
+    .toISOString()
+    .slice(0, 10);
+
+// order er jonno Shiprocket theke courier ene maxDays + mode diye filter
+const buildShippingOptions = async (order, { maxDays, mode }) => {
+  const cfg = await getStoreDeliveryCfg(order.storeId);
+  const pickupPostcode = cfg?.pincode;
+  if (!pickupPostcode) {
+    return {
+      ok: false,
+      message: "Store delivery settings or pickup pincode is missing",
+    };
+  }
+
+  const isIntl = order.deliveryInfo?.mode === "INTERNATIONAL";
+  let result;
+
+  if (isIntl) {
+    const countryCode = toCountryCode(order.deliveryAddress.country);
+    if (!countryCode) {
+      return {
+        ok: false,
+        message: "Country is not supported for courier lookup",
+      };
+    }
+    result = await checkInternationalServiceability({
+      pickupPostcode,
+      countryCode,
+      parcel: order.parcel,
+      weightKg: order.parcel?.chargeableWeight,
+    });
+  } else {
+    result = await checkServiceability({
+      pickupPostcode,
+      deliveryPostcode: order.deliveryAddress.pincode,
+      parcel: order.parcel,
+      weightKg: order.parcel?.chargeableWeight,
+      cod: order.paymentMethod === "COD" && !order.paymentOff,
+    });
+  }
+
+  if (!result.serviceable) {
+    return { ok: true, serviceable: false, options: [], all: [], isIntl };
+  }
+
+  const all = result.couriers
+    .filter((c) => Number.isFinite(c.etaDays))
+    .sort((a, b) => a.etaDays - b.etaDays || a.rate - b.rate);
+
+  const options = all
+    .filter((c) => c.etaDays <= maxDays)
+    // bidesh e Air/Surface tothyo nirbhorjogyo noy, tai mode filter shudhu deshi order e
+    .filter((c) => isIntl || mode === "ANY" || c.mode === mode)
+    .sort((a, b) => a.rate - b.rate || a.etaDays - b.etaDays);
+
+  return { ok: true, serviceable: true, options, all, isIntl };
+};
+
+// ---------- GET /api/order/store-orders/:orderId/shipping-options?maxDays=2&mode=AIR ----------
+const getShippingOptions = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const userId = getUserId(req);
+
+    if (!mongoose.isValidObjectId(orderId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
+    }
+    const { maxDays, mode } = shippingOptionsQuerySchema.parse(req.query);
+
+    const order = await OrderModel.findById(orderId).lean();
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+    if (!(await isStoreOwner(order.storeId, userId))) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized for this order" });
+    }
+
+    const dMode = order.deliveryInfo?.mode;
+    if (
+      order.deliveryEnabled === false ||
+      !["NATIONAL", "INTERNATIONAL"].includes(dMode)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          dMode === "LOCAL"
+            ? "This order is within your local delivery area, so no courier is needed"
+            : "Courier options are not available for this order",
+      });
+    }
+    if (!SHIPPABLE_STATUSES.includes(order.status) || order.shipment?.awb) {
+      return res.status(400).json({
+        success: false,
+        message: "Courier cannot be changed after the shipment is created",
+      });
+    }
+    if (!isShiprocketAvailable()) {
+      return res.status(503).json({
+        success: false,
+        message: "Shiprocket is currently unavailable",
+      });
+    }
+
+    const r = await buildShippingOptions(order, { maxDays, mode });
+    if (!r.ok) {
+      return res.status(400).json({ success: false, message: r.message });
+    }
+
+    const quotedId = order.deliveryInfo?.courierId ?? null;
+    const options = r.options.map((c) => ({
+      courierId: c.id,
+      name: c.name,
+      mode: c.mode,
+      etaDays: c.etaDays,
+      etd: c.etd,
+      rate: c.rate,
+      rating: c.rating,
+      isQuoted: c.id === quotedId,
+    }));
+
+    let message = null;
+    if (!r.serviceable) {
+      message = "No courier serves this address";
+    } else if (options.length === 0) {
+      const fastest = r.all[0];
+      message =
+        (maxDays === 0
+          ? "Same-day delivery is not offered by couriers for this route."
+          : `No courier can deliver within ${maxDays} day(s).`) +
+        (fastest
+          ? ` Fastest available: ${fastest.etaDays} day(s) (${fastest.name}).`
+          : "");
+    }
+
+    return res.status(200).json({
+      success: true,
+      maxDays,
+      mode,
+      canSelect: !r.isIntl, // bidesh e shudhu dekha, select noy
+      customerShippingCharge: order.shippingCharge || 0,
+      options,
+      message,
+    });
+  } catch (error) {
+    return handleError(res, error, "Get Shipping Options Error");
+  }
+};
+
+// ---------- PATCH /api/order/store-orders/:orderId/delivery-option ----------
+// body: { maxDays, mode, courierId }
+const selectShippingOption = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const userId = getUserId(req);
+
+    if (!mongoose.isValidObjectId(orderId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid order id" });
+    }
+    const { maxDays, mode, courierId } = selectShippingOptionSchema.parse(
+      req.body,
+    );
+
+    const order = await OrderModel.findById(orderId).lean();
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Order not found" });
+    }
+    if (!(await isStoreOwner(order.storeId, userId))) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Not authorized for this order" });
+    }
+    if (
+      order.deliveryEnabled === false ||
+      order.deliveryInfo?.mode !== "NATIONAL" ||
+      !SHIPPABLE_STATUSES.includes(order.status) ||
+      order.shipment?.awb
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Courier cannot be changed for this order",
+      });
+    }
+    if (!isShiprocketAvailable()) {
+      return res.status(503).json({
+        success: false,
+        message: "Shiprocket is currently unavailable",
+      });
+    }
+
+    // server e abar yachai: client er pathano courierId asholei oi simar moddhe ache kina
+    const r = await buildShippingOptions(order, { maxDays, mode });
+    if (!r.ok) {
+      return res.status(400).json({ success: false, message: r.message });
+    }
+    const chosen = r.options.find((c) => c.id === courierId);
+    if (!chosen) {
+      return res.status(409).json({
+        success: false,
+        message:
+          "This courier is no longer available for the selected delivery time. Please refresh the options",
+      });
+    }
+
+    // handling time + courier er din (deliveryEstimate.js er sathe ek hishab)
+    const cfg = await getStoreDeliveryCfg(order.storeId);
+    const expectedYmd = ymdAfterMinutesIST(
+      handlingMinutesOf(cfg) + chosen.etaDays * 1440,
+    );
+
+    const updated = await OrderModel.findOneAndUpdate(
+      {
+        _id: orderId,
+        status: { $in: SHIPPABLE_STATUSES },
+        "shipment.awb": null, // AWB hoye gele update hobe na
+      },
+      {
+        $set: {
+          "deliveryInfo.courierId": chosen.id,
+          "deliveryInfo.courierName": chosen.name,
+          "deliveryInfo.courierRate": chosen.rate,
+          "deliveryInfo.courierEtaDays": chosen.etaDays,
+          "deliveryInfo.courierMode": chosen.mode,
+          "deliveryInfo.requestedMaxDays": maxDays,
+          "deliveryInfo.requestedMode": mode,
+          "deliveryInfo.courierSelectedBy": "STORE",
+          "deliveryInfo.source": "SHIPROCKET",
+          expectedDeliveryDate: toDeliveryDate(expectedYmd),
+        },
+      },
+      { new: true },
+    )
+      .populate("userId", CUSTOMER_FIELDS)
+      .lean();
+
+    if (!updated) {
+      return res.status(409).json({
+        success: false,
+        message: "Order has just changed, please refresh",
+      });
+    }
+
+    const modeLabel =
+      chosen.mode === "AIR" ? "Air" : chosen.mode === "SURFACE" ? "Surface" : null;
+
+    return res.status(200).json({
+      success: true,
+      message: `${chosen.name} selected${modeLabel ? ` (${modeLabel})` : ""}, about ${chosen.etaDays} day(s)`,
+      order: updated,
+    });
+  } catch (error) {
+    return handleError(res, error, "Select Shipping Option Error");
+  }
+};
+
 module.exports = {
   checkout,
   buyNow,
@@ -1840,4 +2136,6 @@ module.exports = {
   submitQuote,
   restoreOrderStock,
   checkoutPreview,
+  getShippingOptions, 
+  selectShippingOption,
 };

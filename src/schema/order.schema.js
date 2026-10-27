@@ -218,6 +218,22 @@ const initiatePaymentSchema = z.object({
   returnUrl: z.string().url().optional(),
 });
 
+// ---- [নতুন] Store: delivery speed + courier select ----
+const SHIP_MODES = ["ANY", "AIR", "SURFACE"];
+
+// GET /store-orders/:orderId/shipping-options?maxDays=2&mode=AIR
+const shippingOptionsQuerySchema = z.object({
+  maxDays: z.coerce.number().int().min(0).max(30).default(3),
+  mode: z.enum(SHIP_MODES).default("ANY"),
+});
+
+// PATCH /store-orders/:orderId/delivery-option
+const selectShippingOptionSchema = z.object({
+  maxDays: z.coerce.number().int().min(0).max(30),
+  mode: z.enum(SHIP_MODES).default("ANY"),
+  courierId: z.coerce.number().int().positive(),
+});
+
 module.exports = {
   ORDER_STATUSES,
   PAYMENT_METHODS,
@@ -232,4 +248,6 @@ module.exports = {
   createRequestSchema,
   decideRequestSchema,
   completeRequestSchema,
+  shippingOptionsQuerySchema,
+  selectShippingOptionSchema,
 };

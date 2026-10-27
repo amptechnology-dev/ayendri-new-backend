@@ -17,6 +17,8 @@ const {
   updateDeliveryDate,
   submitQuote,
   checkoutPreview,
+  getShippingOptions, // [নতুন]
+  selectShippingOption, // [নতুন]
 } = require("../controller/order.controller.js");
 const {
   createOrderRequest,
@@ -84,6 +86,19 @@ router.patch(
   verifyJwt,
   authorize("STORE"),
   updateDeliveryDate,
+);
+// [নতুন] delivery speed (koto din / Air / Surface) onujayi courier list + select
+router.get(
+  "/store-orders/:orderId/shipping-options",
+  verifyJwt,
+  authorize("STORE"),
+  getShippingOptions,
+);
+router.patch(
+  "/store-orders/:orderId/delivery-option",
+  verifyJwt,
+  authorize("STORE"),
+  selectShippingOption,
 );
 // price estimate pathano
 router.patch(

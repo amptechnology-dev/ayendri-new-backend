@@ -145,6 +145,21 @@ const deliveryInfoSchema = new mongoose.Schema(
     courierName: { type: String, default: null },
     courierRate: { type: Number, default: null }, // courier ke asol khoroch
     courierEtaDays: { type: Number, default: null }, // courier er nijer ETA (din)
+
+    // [নতুন] store je courier / speed bechechhe
+    courierMode: { type: String, enum: ["AIR", "SURFACE"], default: null },
+    requestedMaxDays: { type: Number, default: null }, // "koto diner moddhe chai"
+    requestedMode: {
+      type: String,
+      enum: ["ANY", "AIR", "SURFACE"],
+      default: "ANY",
+    },
+    courierSelectedBy: {
+      type: String,
+      enum: ["AUTO", "STORE"],
+      default: "AUTO",
+    },
+
     chargeableWeightKg: { type: Number, default: null },
     shippingCharge: { type: Number, default: 0 }, // customer ke je charge
     baseShippingCharge: { type: Number, default: null }, // order value rule er age

@@ -160,6 +160,12 @@ const etaDaysOf = (c) => {
   return null; // ETA jana nei, caller manual days use korbe
 };
 
+// [নতুন] is_surface theke Air / Surface. Field na thakle null (jana nei)
+const modeOf = (c) => {
+  if (c.is_surface === undefined || c.is_surface === null) return null;
+  return c.is_surface === true || Number(c.is_surface) === 1 ? "SURFACE" : "AIR";
+};
+
 const normalizeServiceability = (data, cod) => {
   const list = data?.data?.available_courier_companies || [];
 
@@ -172,6 +178,7 @@ const normalizeServiceability = (data, cod) => {
       etd: c.etd || null,
       cod: Number(c.cod) === 1,
       rating: Number(c.rating) || null,
+      mode: modeOf(c), // [নতুন] "AIR" | "SURFACE" | null
     }))
     .filter((c) => Number.isFinite(c.rate)); // ETA na thakleo courier bad jabe na
 
@@ -250,7 +257,6 @@ const checkServiceability = async ({
   });
   return value;
 };
-
 
 // desher naam -> ISO code (2 okkhorer code dile seta-i use hoy). Shiprocket er supported 44 desh er sathe mil rakho
 const COUNTRY_CODES = {
@@ -550,8 +556,8 @@ module.exports = {
   createAdhocOrder,
   assignAwb,
   generatePickup,
-  listPickupLocations,  
-  addPickupLocation,     
+  listPickupLocations,
+  addPickupLocation,
   calcWeightKg,
   buildParcel,
 };
