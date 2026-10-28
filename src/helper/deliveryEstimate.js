@@ -348,34 +348,74 @@ const applyChargeRules = (baseCharge, itemsTotal, rules) => {
     : { charge: baseCharge, rule: null };
 };
 
-/**
- * checkStoreDelivery er result + order er items total diye shipping charge final kore.
- * Order create / checkout preview e items total ber hoar por eta chalate hoy.
- * INTERNATIONAL e rule lage na (courier er asol khoroch-i)
- */
-const finalizeShipping = (delivery, itemsTotal) => {
+const resolveRulesByType = (cfg) => {
+  const legacy = cfg.chargeRules || [];
+  const p = Array.isArray(cfg.productChargeRules) ? cfg.productChargeRules : [];
+  const s = Array.isArray(cfg.serviceChargeRules) ? cfg.serviceChargeRules : [];
+  if (p.length === 0 && s.length === 0) {
+    return { PRODUCT: legacy, SERVICE: legacy };
+  }
+  return { PRODUCT: p, SERVICE: s };
+};
+
+const rulesForType = (delivery, type) => {
+  const list = delivery?.chargeRulesByType?.[type];
+  return Array.isArray(list) ? list : delivery?.chargeRules || [];
+};
+
+// proti type er "eto taka er upor free" threshold
+const freeThresholds = (delivery) => {
+  const min = (type) => {
+    const list = rulesForType(delivery, type)
+      .filter((r) => r.charge === 0)
+      .map((r) => r.minOrderValue);
+    return list.length ? Math.min(...list) : null;
+  };
+  return { PRODUCT: min("PRODUCT"), SERVICE: min("SERVICE") };
+};
+
+const finalizeShipping = (delivery, totals, productType = "PRODUCT") => {
   const info = delivery?.info;
   if (!info) return null;
 
   const base = info.shippingCharge;
-  if (info.mode === "INTERNATIONAL")
+  if (info.mode === "INTERNATIONAL") {
     return { ...info, baseShippingCharge: base };
+  }
 
-  const { charge, rule } = applyChargeRules(
-    base,
-    itemsTotal,
-    delivery.chargeRules,
-  );
-  if (!rule) return { ...info, baseShippingCharge: base };
+  const byType =
+    totals !== null && typeof totals === "object"
+      ? totals
+      : { [productType]: totals };
+
+  const evals = Object.entries(byType)
+    .filter(
+      ([, total]) =>
+        total !== null && total !== undefined && Number.isFinite(Number(total)),
+    )
+    .map(([type, total]) => {
+      const { charge, rule } = applyChargeRules(
+        base,
+        total,
+        rulesForType(delivery, type),
+      );
+      return { type, charge, rule };
+    });
+
+  if (evals.length === 0) return { ...info, baseShippingCharge: base };
+
+  const worst = evals.reduce((a, b) => (b.charge > a.charge ? b : a));
+  if (!worst.rule) return { ...info, baseShippingCharge: base };
 
   return {
     ...info,
     baseShippingCharge: base,
-    shippingCharge: charge,
+    shippingCharge: worst.charge,
+    appliedRuleType: worst.type,
     shippingNote:
-      charge === 0
-        ? `Free delivery on orders of ₹${rule.minOrderValue} or more`
-        : `Delivery ₹${charge} on orders of ₹${rule.minOrderValue} or more`,
+      worst.charge === 0
+        ? `Free delivery on orders of ₹${worst.rule.minOrderValue} or more`
+        : `Delivery ₹${worst.charge} on orders of ₹${worst.rule.minOrderValue} or more`,
   };
 };
 
@@ -386,20 +426,12 @@ const notDeliverable = (message) => ({
   message,
 });
 
-/**
- * Ekta store ei address e deliver kore kina + somoy + shipping charge.
- * Return: { deliverable, configured, message?, info, chargeRules }
- *  - configured=false : store e delivery off ba setting nei -> kono restriction / estimate / charge nei
- *  - country : India na hole international (store allowInternational + courier ON thakte hobe)
- *  - weightKg / cod : courier hishabe lage. cod = courier COD collect korbe kina
- *  - policy : getStorePolicy er result (dile abar DB query hoy na)
- */
 const checkStoreDelivery = async ({
   storeId,
   pincode,
   country,
   weightKg,
-  parcel, // shiprocket.buildParcel() er result (dile weight + dimension dhore)
+  parcel,
   cod = false,
   policy,
   fastest = false,
@@ -450,7 +482,13 @@ const checkStoreDelivery = async ({
       parcel,
       fastest,
     });
-    return { deliverable: true, configured: true, info, chargeRules: [] };
+    return {
+      deliverable: true,
+      configured: true,
+      info,
+      chargeRules: [],
+      chargeRulesByType: { PRODUCT: [], SERVICE: [] },
+    };
   }
 
   // ---------- INDIA ----------
@@ -458,7 +496,8 @@ const checkStoreDelivery = async ({
     return notDeliverable("Please enter a valid 6 digit pincode");
   }
 
-  const chargeRules = cfg.chargeRules || [];
+  const chargeRulesByType = resolveRulesByType(cfg);
+  const chargeRules = chargeRulesByType.PRODUCT; // purono code er jonno
 
   // ---------- LOCAL ----------
   if (allowLocal && cfg.radiusKm) {
@@ -483,6 +522,7 @@ const checkStoreDelivery = async ({
         configured: true,
         info: resolveLocal({ cfg, distanceKm, handlingMin, pin }),
         chargeRules,
+        chargeRulesByType,
       };
     }
   }
@@ -509,41 +549,20 @@ const checkStoreDelivery = async ({
       configured: true,
       info: national.info,
       chargeRules,
+      chargeRulesByType,
     };
   }
 
   return notDeliverable(`This store does not deliver to pincode ${pin}`);
 };
 
-/**
- * Product listing / detail e dekhanor jonno chhoto summary.
- * - pincode nei, store e delivery off, ba setting nei -> null
- * - deliverable na -> { deliverable: false, label: "..." }
- * - itemsTotal dile order value rule dhore charge hishab hoy
- */
-const getDeliverySummary = async ({
-  storeId,
-  pincode,
-  country,
-  itemsTotal = null,
-  parcel = null, // product detail e dile oi product er weight/size dhore estimate
-  fastest = false,
-}) => {
-  const pin = String(pincode || "").trim();
-  if (!pin) return null;
-
-  const policy = await getStorePolicy(storeId);
-  if (!policy.hasDelivery) return null;
-
-  const result = await checkStoreDelivery({
-    storeId,
-    pincode: pin,
-    country,
-    parcel,
-    policy,
-    fastest,
-  });
-  if (!result.configured) return null;
+// ---------- summary (checkStoreDelivery result theke, sync) ----------
+// itemsTotal + productType dile oi product er rule onujayi charge / free hishab hoy
+const buildSummary = (
+  result,
+  { itemsTotal = null, productType = "PRODUCT" } = {},
+) => {
+  if (!result || !result.configured) return null;
 
   if (!result.deliverable) {
     return {
@@ -558,7 +577,9 @@ const getDeliverySummary = async ({
       estimatedMaxDate: null,
       estimatedMaxAt: null,
       shippingCharge: null,
+      isFree: false,
       freeDeliveryAbove: null,
+      freeDeliveryRules: { PRODUCT: null, SERVICE: null },
       shippingNote: null,
       courierName: null,
       chargeableWeightKg: null,
@@ -569,13 +590,11 @@ const getDeliverySummary = async ({
 
   const info =
     itemsTotal !== null && itemsTotal !== undefined
-      ? finalizeShipping(result, itemsTotal)
+      ? finalizeShipping(result, itemsTotal, productType)
       : result.info;
 
-  const freeRules = (result.chargeRules || [])
-    .filter((r) => r.charge === 0)
-    .map((r) => r.minOrderValue);
-  const freeDeliveryAbove = freeRules.length ? Math.min(...freeRules) : null;
+  const thresholds = freeThresholds(result);
+  const shippingCharge = info.shippingCharge ?? 0;
 
   return {
     deliverable: true,
@@ -588,14 +607,58 @@ const getDeliverySummary = async ({
     estimatedMinDate: info.estimatedMinDate,
     estimatedMaxDate: info.estimatedMaxDate,
     estimatedMaxAt: info.estimatedMaxAt,
-    shippingCharge: info.shippingCharge ?? 0,
-    freeDeliveryAbove,
+    shippingCharge,
+    isFree: shippingCharge === 0,
+    freeDeliveryAbove: thresholds[productType] ?? null,
+    freeDeliveryRules: thresholds,
     shippingNote: info.shippingNote,
     courierName: info.courierName ?? null,
     chargeableWeightKg: info.chargeableWeightKg ?? null,
     fastest: !!info.fastestDelivery,
     label: info.etaLabel,
   };
+};
+
+const getDeliveryResult = async ({
+  storeId,
+  pincode,
+  country,
+  parcel = null,
+  fastest = false,
+}) => {
+  const pin = String(pincode || "").trim();
+  if (!pin) return null;
+
+  const policy = await getStorePolicy(storeId);
+  if (!policy.hasDelivery) return null;
+
+  return checkStoreDelivery({
+    storeId,
+    pincode: pin,
+    country,
+    parcel,
+    policy,
+    fastest,
+  });
+};
+
+const getDeliverySummary = async ({
+  storeId,
+  pincode,
+  country,
+  itemsTotal = null,
+  parcel = null,
+  fastest = false,
+  productType = "PRODUCT",
+}) => {
+  const result = await getDeliveryResult({
+    storeId,
+    pincode,
+    country,
+    parcel,
+    fastest,
+  });
+  return buildSummary(result, { itemsTotal, productType });
 };
 
 module.exports = {
@@ -611,4 +674,8 @@ module.exports = {
   formatDurationLabel,
   formatDeliveryLabel,
   getDeliverySummary,
+  getDeliverySummary,
+  getDeliveryResult,
+  buildSummary,
+  freeThresholds,
 };

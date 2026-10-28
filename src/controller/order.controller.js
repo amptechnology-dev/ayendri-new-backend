@@ -446,7 +446,21 @@ const attemptStoreCheckout = async ({
   // [SHIPPING] items payable dhore order value rule (eto taka er upor free ityadi) chalano,
   // tarpor items + shipping = customer er total payable (PayU eta-i nibe)
   const itemsTotal = totalAmount;
-  const shippingInfo = finalizeShipping(delivery, itemsTotal); // delivery off hole null
+
+  // [NEW] product / service alada subtotal (price x quantity, GST soho).
+  // proti type nijer rule e check hoy, tai cart e mix thakleo thik kaj kore
+  const totalsByType = {};
+  for (const i of gstItems) {
+    const type =
+      productMap.get(String(i.productId))?.productType === "SERVICE"
+        ? "SERVICE"
+        : "PRODUCT";
+    totalsByType[type] = round2(
+      (totalsByType[type] || 0) + Number(i.lineTotalWithGst ?? i.lineTotal ?? 0),
+    );
+  }
+
+  const shippingInfo = finalizeShipping(delivery, totalsByType); // delivery off hole null
   const shippingCharge = round2(shippingInfo?.shippingCharge || 0);
   const grandTotal = round2(itemsTotal + shippingCharge);
 

@@ -42,7 +42,11 @@ const {
   findOfferWithoutMrp,
   isPriceOnRequestProduct,
 } = require("../helper/priceQuote.js");
-const { getDeliverySummary } = require("../helper/deliveryEstimate.js");
+const {
+  getDeliverySummary,
+  getDeliveryResult,
+  buildSummary,
+} = require("../helper/deliveryEstimate.js");
 // [GST]
 const { applyGst, withEffectiveGst } = require("../helper/gst.js");
 const shiprocket = require("../helper/shiprocket.js");
@@ -1271,13 +1275,62 @@ const formatProduct = ({ categoryId, ...product }) => ({
   priceOnRequest: isPriceOnRequestProduct(product),
 });
 
+// listing e dekhanor jonno product er sobcheye kom offer price (variant / size / simple)
+const getListingPrice = (p) => {
+  const prices = [];
+  const push = (v) => {
+    if (v !== undefined && v !== null && Number.isFinite(Number(v))) {
+      prices.push(Number(v));
+    }
+  };
+  (p.variants || []).forEach((v) => {
+    if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
+      v.sizeVariants.forEach((sv) => push(sv.offerPrice));
+    } else {
+      push(v.offerPrice);
+    }
+  });
+  if (!prices.length) push(p.offerPrice);
+  return prices.length ? Math.min(...prices) : null;
+};
+
+// product detail e: selected variant / size er price, na thakle listing price
+const unitPriceFor = (p, variantId) => {
+  if (variantId) {
+    const id = String(variantId);
+    for (const v of p.variants || []) {
+      if (String(v._id) === id && v.offerPrice != null) {
+        return Number(v.offerPrice);
+      }
+      for (const sv of v.sizeVariants || []) {
+        if (String(sv._id) === id && sv.offerPrice != null) {
+          return Number(sv.offerPrice);
+        }
+      }
+    }
+  }
+  return getListingPrice(p);
+};
+
+const productTypeOf = (p) => (p?.productType === "SERVICE" ? "SERVICE" : "PRODUCT");
+
 const buildDeliveryPicker = async ({ storeId, pincode, country, products }) => {
-  const base = await getDeliverySummary({ storeId, pincode, country });
+  // store delivery ekbar-i check (normal + dorkar hole fastest), tarpor proti product e alada hishab
+  const baseRes = await getDeliveryResult({ storeId, pincode, country });
   const hasFast = products.some((p) => p.fastestDelivery);
-  const fast = hasFast
-    ? await getDeliverySummary({ storeId, pincode, country, fastest: true })
-    : base;
-  return { base, pick: (p) => (p?.fastestDelivery ? fast : base) };
+  const fastRes = hasFast
+    ? await getDeliveryResult({ storeId, pincode, country, fastest: true })
+    : baseRes;
+
+  const base = buildSummary(baseRes); // store-level summary (product price chhara)
+
+  const pick = (p) =>
+    buildSummary(p?.fastestDelivery ? fastRes : baseRes, {
+      itemsTotal: p ? getListingPrice(p) : null, // price na thakle (price on request) shudhu base charge
+      productType: productTypeOf(p),
+    });
+
+  return { base, pick };
 };
 
 const fetchStoreProducts = async (store, query, categoryId) => {
@@ -1705,16 +1758,17 @@ const getStoreSingleProduct = async (req, res) => {
       : [];
 
     const rawVariant = String(req.query.variantId || "").trim();
-    const parcel = shiprocket.buildParcel([
-      {
-        product,
-        variantId:
-          !rawVariant || rawVariant === "null" || rawVariant === "undefined"
-            ? null
-            : rawVariant,
-        quantity: Math.max(1, parseInt(req.query.quantity, 10) || 1),
-      },
-    ]);
+    const variantId =
+      !rawVariant || rawVariant === "null" || rawVariant === "undefined"
+        ? null
+        : rawVariant;
+    const quantity = Math.max(1, parseInt(req.query.quantity, 10) || 1);
+
+    const parcel = shiprocket.buildParcel([{ product, variantId, quantity }]);
+
+    // [NEW] order value = selected variant er price x quantity
+    const unit = unitPriceFor(product, variantId);
+    const itemsTotal = unit !== null ? Math.round(unit * quantity * 100) / 100 : null;
 
     const [related, productDelivery, storeSettings] = await Promise.all([
       // related products er jonno (default weight), [FAST] proti product er flag onujayi
@@ -1731,6 +1785,8 @@ const getStoreSingleProduct = async (req, res) => {
         country: req.query.country,
         parcel,
         fastest: product.fastestDelivery === true,
+        itemsTotal, // [NEW]
+        productType: productTypeOf(product), // [NEW]
       }),
       getPublicStoreSettings(store._id),
     ]);

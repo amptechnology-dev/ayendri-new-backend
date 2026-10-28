@@ -33,6 +33,10 @@ const saveDeliverySettingsSchema = z
     localDeliveryCharge: z.coerce.number().min(0).max(100000).optional(),
 
     // order value rules
+    // [NEW] product / service alada rule
+    productChargeRules: z.array(ruleSchema).max(20).optional(),
+    serviceChargeRules: z.array(ruleSchema).max(20).optional(),
+    // purono field (purono frontend / API call er jonno), notun frontend pathabe na
     chargeRules: z.array(ruleSchema).max(20).optional(),
 
     // NATIONAL
@@ -94,17 +98,22 @@ const saveDeliverySettingsSchema = z
       });
     }
 
-    const seenRules = new Set();
-    (d.chargeRules || []).forEach((r, i) => {
-      if (seenRules.has(r.minOrderValue)) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["chargeRules", i, "minOrderValue"],
-          message: "Two rules have the same order value",
+    // [NEW] product / service / purono rule, proti list e same order value duplicate check
+    ["productChargeRules", "serviceChargeRules", "chargeRules"].forEach(
+      (field) => {
+        const seenRules = new Set();
+        (d[field] || []).forEach((r, i) => {
+          if (seenRules.has(r.minOrderValue)) {
+            ctx.addIssue({
+              code: "custom",
+              path: [field, i, "minOrderValue"],
+              message: "Two rules have the same order value",
+            });
+          }
+          seenRules.add(r.minOrderValue);
         });
-      }
-      seenRules.add(r.minOrderValue);
-    });
+      },
+    );
 
     if (needsNational) {
       if (d.nationalMinDays === undefined || d.nationalMaxDays === undefined) {

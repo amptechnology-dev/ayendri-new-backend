@@ -63,6 +63,12 @@ const storeDeliverySchema = new mongoose.Schema(
     internationalFallbackCharge: { type: Number, default: 0, min: 0 },
 
     // ---------- ORDER VALUE RULES ----------
+    // [NEW] PRODUCT order er jonno alada rule (radius + courier dui-tei lagbe)
+    productChargeRules: { type: [chargeRuleSchema], default: [] },
+    // [NEW] SERVICE order er jonno alada rule
+    serviceChargeRules: { type: [chargeRuleSchema], default: [] },
+    // purono field. Notun save e khali kora hoy. Notun rule na thakle
+    // purono store e eta-i duto type er jonno fallback hishebe kaj kore
     chargeRules: { type: [chargeRuleSchema], default: [] },
 
     // order pack / dispatch korte lagbe koto somoy (shob delivery te jog hoy)

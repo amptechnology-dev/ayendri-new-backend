@@ -10,6 +10,7 @@ const {
   countPincodesInRadius,
   checkStoreDelivery,
   finalizeShipping,
+  freeThresholds,
 } = require("../helper/deliveryEstimate.js");
 const {
   ensurePickupLocation,
@@ -57,10 +58,6 @@ const handleError = (res, error, label) => {
 const isStoreOwner = async (storeId, userId) =>
   !!(await StoreModel.exists({ _id: storeId, userId }));
 
-// ===================== 1. STORE: SAVE / UPDATE DELIVERY SETTINGS =====================
-// PUT /api/delivery/settings
-// body: { storeId, deliveryType, pincode, radiusKm?, localDeliveryDays?,
-//         nationalMinDays?, nationalMaxDays?, handlingDays? }
 const saveDeliverySettings = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -114,12 +111,27 @@ const saveDeliverySettings = async (req, res) => {
       : [];
 
     // order value rule (choto theke boro)
-    const chargeRules = [...(data.chargeRules || [])]
-      .sort((a, b) => a.minOrderValue - b.minOrderValue)
-      .map((r) => ({
-        minOrderValue: r.minOrderValue,
-        charge: round2(r.charge),
-      }));
+    const normRules = (list) =>
+      [...(list || [])]
+        .sort((a, b) => a.minOrderValue - b.minOrderValue)
+        .map((r) => ({
+          minOrderValue: r.minOrderValue,
+          charge: round2(r.charge),
+        }));
+
+    let productChargeRules = normRules(data.productChargeRules);
+    let serviceChargeRules = normRules(data.serviceChargeRules);
+    const legacyRules = normRules(data.chargeRules);
+
+    // purono frontend sudhu chargeRules pathale duto type-ei same rule
+    if (
+      productChargeRules.length === 0 &&
+      serviceChargeRules.length === 0 &&
+      legacyRules.length > 0
+    ) {
+      productChargeRules = legacyRules;
+      serviceChargeRules = legacyRules;
+    }
 
     const allowInternational =
       needsNational && data.allowInternational === true;
@@ -148,7 +160,10 @@ const saveDeliverySettings = async (req, res) => {
           : (data.localDeliveryCharge ?? 0)
         : 0,
 
-      chargeRules,
+      // [NEW] product / service alada rule. Purono chargeRules khali, jate fallback na hoy
+      productChargeRules,
+      serviceChargeRules,
+      chargeRules: [],
 
       nationalFallbackCharge: needsNational
         ? (data.nationalFallbackCharge ?? 0)
@@ -200,8 +215,6 @@ const saveDeliverySettings = async (req, res) => {
   }
 };
 
-// ===================== 2. STORE: GET MY DELIVERY SETTINGS =====================
-// GET /api/delivery/settings/:storeId
 const getDeliverySettings = async (req, res) => {
   try {
     const { storeId } = req.params;
@@ -312,6 +325,12 @@ const checkDelivery = async (req, res) => {
       .lean();
     if (!store) return sendStoreUnavailable(res);
 
+    // [NEW] productType: query theke, product dile product er nijer type
+    let productType =
+      String(req.query.productType || "").toUpperCase() === "SERVICE"
+        ? "SERVICE"
+        : "PRODUCT";
+
     // product dile oi product er packaging theke weight + size
     let parcel = null;
     const { productId } = req.query;
@@ -322,11 +341,13 @@ const checkDelivery = async (req, res) => {
         isActive: true,
       })
         .select(
-          "name packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
+          "name productType packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
         )
         .lean();
 
       if (product) {
+        productType = product.productType === "SERVICE" ? "SERVICE" : "PRODUCT";
+
         const rawVariant = String(req.query.variantId || "").trim();
         const variantId =
           !rawVariant || rawVariant === "null" || rawVariant === "undefined"
@@ -354,15 +375,21 @@ const checkDelivery = async (req, res) => {
 
     const info =
       result.deliverable && itemsTotal !== null
-        ? finalizeShipping(result, itemsTotal)
+        ? finalizeShipping(result, itemsTotal, productType)
         : result.info;
+
+    const thresholds = result.deliverable ? freeThresholds(result) : null;
 
     return res.status(200).json({
       success: true,
       deliverable: result.deliverable,
       configured: result.configured,
       message: result.message || null,
+      productType,
       delivery: info,
+      isFree: info ? (info.shippingCharge ?? 0) === 0 : false,
+      freeDeliveryAbove: thresholds ? thresholds[productType] : null,
+      freeDeliveryRules: thresholds,
       parcel: parcel
         ? {
             weight: parcel.weight,
@@ -843,6 +870,167 @@ const courierWebhook = async (req, res) => {
   }
 };
 
+const getShippingCostReport = async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const { storeId, booked } = req.query;
+
+    const stores = await StoreModel.find({ userId }).select("_id").lean();
+    let ids = stores.map((s) => s._id);
+
+    if (storeId) {
+      if (!mongoose.isValidObjectId(storeId)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Invalid store id" });
+      }
+      if (!ids.some((id) => String(id) === String(storeId))) {
+        return res
+          .status(403)
+          .json({ success: false, message: "Not authorized for this store" });
+      }
+      ids = [new mongoose.Types.ObjectId(storeId)];
+    }
+
+    // from / to (IST)
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const { from, to } = req.query;
+    const range = {};
+    if (from) {
+      if (!re.test(from)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid from date (use YYYY-MM-DD)",
+        });
+      }
+      range.$gte = new Date(`${from}T00:00:00.000+05:30`);
+    }
+    if (to) {
+      if (!re.test(to)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid to date (use YYYY-MM-DD)",
+        });
+      }
+      range.$lte = new Date(`${to}T23:59:59.999+05:30`);
+    }
+
+    const match = {
+      storeId: { $in: ids },
+      "deliveryInfo.source": "SHIPROCKET",
+      status: { $ne: "CANCELLED" },
+    };
+    if (Object.keys(range).length) match.createdAt = range;
+
+    const listMatch = { ...match };
+    if (booked === "true") listMatch["shipment.awb"] = { $nin: [null, ""] };
+    else if (booked === "false") listMatch["shipment.awb"] = null;
+
+    const pageNum = Math.max(parseInt(req.query.page) || 1, 1);
+    const limitNum = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+
+    const RATE = { $ifNull: ["$deliveryInfo.courierRate", 0] };
+    const PAID = { $ifNull: ["$shippingCharge", 0] };
+    const BEARS = { $max: [0, { $subtract: [RATE, PAID] }] };
+    const BOOKED = {
+      $gt: [{ $strLenCP: { $ifNull: ["$shipment.awb", ""] } }, 0],
+    };
+    const sumIf = (cond, expr) => ({
+      $sum: { $cond: [cond, expr, 0] },
+    });
+
+    const [[row], orders, totalOrders] = await Promise.all([
+      OrderModel.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: null,
+            orders: { $sum: 1 },
+            courierCost: { $sum: RATE },
+            customerPaid: { $sum: PAID },
+            storeBears: { $sum: BEARS },
+            bookedOrders: sumIf(BOOKED, 1),
+            bookedCost: sumIf(BOOKED, RATE),
+            bookedBears: sumIf(BOOKED, BEARS),
+            pendingOrders: sumIf({ $not: [BOOKED] }, 1),
+            pendingCost: sumIf({ $not: [BOOKED] }, RATE),
+            pendingBears: sumIf({ $not: [BOOKED] }, BEARS),
+            freeOrders: sumIf(
+              {
+                $and: [{ $lte: [PAID, 0] }, { $gt: [RATE, 0] }],
+              },
+              1,
+            ),
+          },
+        },
+      ]),
+      OrderModel.find(listMatch)
+        .select(
+          "orderNumber createdAt storeName status paymentMethod shippingCharge deliveryInfo shipment.awb shipment.status shipment.courierName",
+        )
+        .sort({ createdAt: -1, _id: -1 })
+        .skip((pageNum - 1) * limitNum)
+        .limit(limitNum)
+        .lean(),
+      OrderModel.countDocuments(listMatch),
+    ]);
+
+    const s = row || {};
+    const summary = {
+      orders: s.orders || 0,
+      courierCost: round2(s.courierCost),
+      customerPaid: round2(s.customerPaid),
+      storeBears: round2(s.storeBears),
+      freeOrders: s.freeOrders || 0,
+      booked: {
+        orders: s.bookedOrders || 0,
+        courierCost: round2(s.bookedCost),
+        storeBears: round2(s.bookedBears),
+      },
+      pending: {
+        orders: s.pendingOrders || 0,
+        courierCost: round2(s.pendingCost),
+        storeBears: round2(s.pendingBears),
+      },
+    };
+
+    const rows = orders.map((o) => {
+      const rate = round2(o.deliveryInfo?.courierRate);
+      const paid = round2(o.shippingCharge);
+      return {
+        orderId: o._id,
+        orderNumber: o.orderNumber,
+        createdAt: o.createdAt,
+        storeName: o.storeName,
+        status: o.status,
+        paymentMethod: o.paymentMethod,
+        courierName: o.shipment?.courierName || o.deliveryInfo?.courierName || null,
+        courierMode: o.deliveryInfo?.courierMode || null,
+        awb: o.shipment?.awb || null,
+        shipmentStatus: o.shipment?.status || null,
+        booked: !!o.shipment?.awb,
+        courierCost: rate,
+        customerPaid: paid,
+        freeForCustomer: paid === 0 && rate > 0,
+        storeBears: round2(Math.max(0, rate - paid)),
+        note: o.deliveryInfo?.shippingNote || null,
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      summary,
+      page: pageNum,
+      limit: limitNum,
+      totalOrders,
+      totalPages: Math.ceil(totalOrders / limitNum),
+      rows,
+    });
+  } catch (error) {
+    return handleError(res, error, "Shipping Cost Report Error");
+  }
+};
+
 module.exports = {
   saveDeliverySettings,
   getDeliverySettings,
@@ -852,4 +1040,5 @@ module.exports = {
   getMyPincode,
   createShiprocketShipment,
   courierWebhook,
+  getShippingCostReport 
 };

@@ -12,6 +12,7 @@ const {
   getMyPincode,
   createShiprocketShipment,
   courierWebhook,
+  getShippingCostReport
 } = require("../controller/delivery.controller.js");
 
 // ---------- STORE ----------
@@ -45,5 +46,7 @@ router.get("/pincode/:pincode", lookupPincode);
 
 // ---------- WEBHOOK (courier -> amader server, x-api-key diye secure) ----------
 router.post("/courier-webhook", courierWebhook);
+
+router.get("/shipping-cost", verifyJwt, authorize("STORE"), getShippingCostReport);
 
 module.exports = router;
