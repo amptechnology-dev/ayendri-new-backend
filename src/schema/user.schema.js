@@ -1,4 +1,5 @@
 const { z } = require("zod");
+const { normalizePhone, isValidIndianMobile } = require("../helper/phone.js");
 
 const addressSchema = z.object({
   label: z.enum(["HOME", "WORK", "OTHER"]).optional(),
@@ -15,16 +16,24 @@ const addressSchema = z.object({
   isDefault: z.boolean().optional(),
 });
 
+// +91 / 0 / space soho jai-i asuk, 10 digit e normalize hoye validate hoy
+const phoneField = z
+  .string()
+  .trim()
+  .transform(normalizePhone)
+  .refine(isValidIndianMobile, "Enter a valid 10-digit mobile number");
+
+const otpField = z
+  .string()
+  .trim()
+  .regex(/^\d{6}$/, "OTP must be 6 digits");
+
 const createUserSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
 
   email: z.string().email("Invalid email format").toLowerCase(),
 
-  phone: z
-    .string()
-    .min(10, "Phone number must be at least 10 digits")
-    .max(11, "Phone number too long")
-    .optional(),
+  phone: phoneField,
 
   password: z.string().min(6, "Password must be at least 6 characters"),
 
@@ -41,17 +50,28 @@ const updateUserSchema = z.object({
 
   email: z.string().email().toLowerCase().optional(),
 
-  phone: z.string().min(10).max(15).optional(),
+  phone: phoneField.optional(),
 
   role: z.enum(["ADMIN", "STORE"]).optional(),
 
   isActive: z.boolean().optional(),
 });
 
+// purono email + password login (ekhon use hocche na, onno jaygay import thakle bhangbe na)
 const loginSchema = z.object({
   email: z.string().email("Invalid email"),
 
   password: z.string().min(6, "Password is required"),
+});
+
+// ---------- phone OTP ----------
+const sendPhoneOtpSchema = z.object({
+  phone: phoneField,
+});
+
+const verifyPhoneOtpSchema = z.object({
+  phone: phoneField,
+  otp: otpField,
 });
 
 const emailField = z
@@ -70,10 +90,7 @@ const sendOtpSchema = z.object({
 const verifyOtpSchema = z.object({
   email: emailField,
   role: roleField,
-  otp: z
-    .string()
-    .trim()
-    .regex(/^\d{6}$/, "OTP must be 6 digits"),
+  otp: otpField,
 });
 
 const resetPasswordSchema = z
@@ -101,6 +118,8 @@ module.exports = {
   emailField,
   sendOtpSchema,
   verifyOtpSchema,
+  sendPhoneOtpSchema,
+  verifyPhoneOtpSchema,
   resetPasswordSchema,
   loginWithOtpSchema,
   addAddressSchema,

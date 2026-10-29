@@ -9,13 +9,13 @@ const { passwordGenerator } = require("../helper/PasswordGenerator.js");
 const {
   createUserSchema,
   updateUserSchema,
+  verifyPhoneOtpSchema,
+  sendPhoneOtpSchema,
 } = require("../schema/user.schema.js");
 const { uploadToR2 } = require("../helper/upload.js");
 const sendPasswordEmail = require("../helper/mail.service.js");
 const sendStoreVerifyEmail = require("../helper/sendStoreVerifyEmail");
 const { sendPasswordSMS } = require("../helper/sendPasswordSMS.js");
-const sendEmailVerificationOTP = require("../helper/sendEmailVerificationOTP.js");
-const EmailVerifyModel = require("../model/otpverify.js");
 const RecentSearchModel = require("../model/recentSearch.model");
 const sendStoreCredentialsEmail = require("../helper/sendStoreCredentialsEmail.js");
 const {
@@ -32,6 +32,13 @@ const {
   generateStoreQr,
   safeGenerateStoreQr,
 } = require("../helper/storeQr.js");
+const { normalizePhone, isValidIndianMobile } = require("../helper/phone.js");
+const {
+  issuePhoneOtp,
+  verifyPhoneOtpCode,
+  clearPhoneOtp,
+} = require("../helper/phoneOtp.js");
+const crypto = require("crypto");
 
 const normalizeEmail = (email) =>
   String(email || "")
@@ -60,6 +67,45 @@ const toNumberOrUndefined = (value) => {
 const accountExists = (email, role) =>
   UserModel.exists({ email: normalizeEmail(email), role });
 
+const safeCompare = (a, b) => {
+  const x = Buffer.from(String(a));
+  const y = Buffer.from(String(b));
+  return x.length === y.length && crypto.timingSafeEqual(x, y);
+};
+
+// is this mobile number already registered under this role
+const phoneExists = (phone, role) => UserModel.exists({ phone, role });
+
+const phoneConflict = (res, role) =>
+  res.status(409).json({
+    success: false,
+    message: `This mobile number is already registered as ${role}`,
+  });
+
+// returns normalized phone, or sends 400 and returns null
+const requirePhone = (res, value) => {
+  const phone = normalizePhone(value);
+  if (!isValidIndianMobile(phone)) {
+    res.status(400).json({
+      success: false,
+      message: "Enter a valid 10-digit mobile number",
+    });
+    return null;
+  }
+  return phone;
+};
+
+// SIGNUP OTP pathay, SMS fail holeo register flow bhangbe na (true = pathano gelo)
+const sendSignupOtp = async (phone) => {
+  try {
+    const result = await issuePhoneOtp(phone, "SIGNUP");
+    return result.ok;
+  } catch (error) {
+    console.error("Signup OTP SMS error:", error);
+    return false;
+  }
+};
+
 const roleConflict = (res, role) =>
   res.status(409).json({
     success: false,
@@ -84,7 +130,6 @@ const DUPLICATE_FIELD_LABELS = {
   gstin: "GSTIN",
 };
 
-// one place that turns any registration error into a specific message
 const sendRegisterError = (res, error, { role, label }) => {
   if (error.name === "ZodError") {
     const errors = error.issues.map((err) => ({
@@ -115,6 +160,9 @@ const sendRegisterError = (res, error, { role, label }) => {
     if (keys.includes("email") && keys.includes("role")) {
       return roleConflict(res, role);
     }
+    if (keys.includes("phone") && keys.includes("role")) {
+      return phoneConflict(res, role);
+    }
     const field = keys[0];
     return res.status(409).json({
       success: false,
@@ -136,11 +184,22 @@ const sendRegisterError = (res, error, { role, label }) => {
 
 const registerAdmin = async (req, res) => {
   try {
+    // adminCode server e verify, env e set na thakle admin register bondho
+    const expectedCode = process.env.ADMIN_REGISTER_CODE;
+    if (!expectedCode || !safeCompare(req.body.adminCode || "", expectedCode)) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Invalid admin access code" });
+    }
+
     const parsedData = createUserSchema.parse(req.body);
     const email = normalizeEmail(parsedData.email);
 
     if (await accountExists(email, "ADMIN")) {
       return roleConflict(res, "ADMIN");
+    }
+    if (await phoneExists(parsedData.phone, "ADMIN")) {
+      return phoneConflict(res, "ADMIN");
     }
 
     const salt = await bcrypt.genSalt(10);
@@ -151,25 +210,28 @@ const registerAdmin = async (req, res) => {
       email,
       password: hashedPassword,
       role: "ADMIN",
-      isVerified: true,
+      isVerified: false, // phone OTP verify korle true hobe
     });
     await user.save();
 
     let emailSent = true;
     try {
       await sendPasswordEmail(email, parsedData.password);
-      // await sendPasswordSMS(parsedData.phone, email, parsedData.password);
     } catch (mailError) {
       emailSent = false;
       console.error("Admin password email error:", mailError);
     }
 
+    const otpSent = await sendSignupOtp(user.phone);
+
     const { password: _password, ...safeUser } = user.toObject();
     return res.status(201).json({
       success: true,
-      message: emailSent
-        ? "Super Admin Register Successfully"
-        : "Super Admin registered, but the password email could not be sent",
+      message: otpSent
+        ? "Super Admin registered and OTP sent to your mobile number"
+        : "Super Admin registered, but the OTP could not be sent. Please request a new OTP.",
+      otpSent,
+      emailSent,
       user: safeUser,
     });
   } catch (error) {
@@ -188,6 +250,9 @@ const registerOwner = async (req, res) => {
     if (await accountExists(email, "STORE")) {
       return roleConflict(res, "STORE");
     }
+    if (await phoneExists(parsedData.phone, "STORE")) {
+      return phoneConflict(res, "STORE");
+    }
 
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(parsedData.password, salt);
@@ -200,20 +265,15 @@ const registerOwner = async (req, res) => {
     });
     await user.save();
 
-    let otpSent = true;
-    try {
-      await sendEmailVerificationOTP(req, user);
-    } catch (mailError) {
-      otpSent = false;
-      console.error("Verification OTP email error:", mailError);
-    }
+    const otpSent = await sendSignupOtp(user.phone);
 
     const { password: _password, ...safeUser } = user.toObject();
     return res.status(201).json({
       success: true,
       message: otpSent
-        ? "Store owner registered and verification email sent successfully!"
-        : "Store owner registered, but the verification email could not be sent. Please try again later.",
+        ? "Store owner registered and OTP sent to your mobile number!"
+        : "Store owner registered, but the OTP could not be sent. Please request a new OTP.",
+      otpSent,
       user: safeUser,
     });
   } catch (error) {
@@ -224,34 +284,23 @@ const registerOwner = async (req, res) => {
   }
 };
 
-const verifyEmailOTP = async (req, res) => {
+// POST /verify-phone-otp   body: { phone, otp, role? }
+const verifyPhoneOTP = async (req, res) => {
   try {
-    const { email, otp, role } = req.body;
-    if (!email || !otp) {
-      return res
-        .status(400)
-        .json({ status: false, message: "All fields are required" });
-    }
+    const { phone, otp } = verifyPhoneOtpSchema.parse(req.body);
+    const role = req.body.role
+      ? String(req.body.role).trim().toUpperCase()
+      : null;
 
-    const normalizedEmail = normalizeEmail(email);
-    const normalizedRole = role ? String(role).trim().toUpperCase() : null;
-
-    if (
-      normalizedRole &&
-      !["ADMIN", "STORE", "USER"].includes(normalizedRole)
-    ) {
+    if (role && !["ADMIN", "STORE", "USER"].includes(role)) {
       return res.status(400).json({ status: false, message: "Invalid role" });
     }
 
-    const accounts = await UserModel.find(
-      normalizedRole
-        ? { email: normalizedEmail, role: normalizedRole }
-        : { email: normalizedEmail },
-    );
+    const accounts = await UserModel.find(role ? { phone, role } : { phone });
     if (!accounts.length) {
       return res
         .status(404)
-        .json({ status: false, message: "Email doesn't exist" });
+        .json({ status: false, message: "Mobile number is not registered" });
     }
 
     let existingUser;
@@ -264,7 +313,7 @@ const verifyEmailOTP = async (req, res) => {
       } else {
         return res.status(400).json({
           status: false,
-          message: "Multiple accounts found for this email. Please send role.",
+          message: "Multiple accounts found for this number. Please send role.",
         });
       }
     }
@@ -272,49 +321,101 @@ const verifyEmailOTP = async (req, res) => {
     if (existingUser.isVerified) {
       return res
         .status(400)
-        .json({ status: false, message: "Email is already verified" });
+        .json({ status: false, message: "Mobile number is already verified" });
     }
 
-    const emailVerification = await EmailVerifyModel.findOne({
-      userId: existingUser._id,
-      otp: String(otp).trim(),
-    });
-    if (!emailVerification) {
-      await sendEmailVerificationOTP(req, existingUser);
-      return res.status(400).json({
-        status: false,
-        message: "Invalid OTP, new OTP sent to your email",
-      });
-    }
-
-    const expirationTime =
-      emailVerification.createdAt.getTime() + 15 * 60 * 1000;
-    if (Date.now() > expirationTime) {
-      await sendEmailVerificationOTP(req, existingUser);
-      return res.status(400).json({
-        status: false,
-        message: "OTP expired, new OTP sent to your email",
-      });
+    const check = await verifyPhoneOtpCode(phone, "SIGNUP", otp);
+    if (!check.ok) {
+      return res
+        .status(check.status)
+        .json({ status: false, message: check.message });
     }
 
     existingUser.isVerified = true;
     await existingUser.save();
-    await EmailVerifyModel.deleteMany({ userId: existingUser._id });
+    await clearPhoneOtp(phone, "SIGNUP");
 
     const token = generateAuthToken(existingUser);
     setAuthCookie(res, token);
 
     return res.status(200).json({
       status: true,
-      message: "Email verified successfully",
+      message: "Mobile number verified successfully",
       token,
       user: buildResponseUser(existingUser),
     });
   } catch (error) {
-    console.error("Verify OTP error:", error);
+    if (error.name === "ZodError") {
+      const errors = error.issues.map((err) => ({
+        field: err.path.join("."),
+        message: err.message,
+      }));
+      return res.status(400).json({
+        status: false,
+        message: errors[0]?.message || "Validation failed",
+        errors,
+      });
+    }
+    console.error("Verify phone OTP error:", error);
     return res.status(500).json({
       status: false,
-      message: "Unable to verify email, please try again later",
+      message: "Unable to verify mobile number, please try again later",
+    });
+  }
+};
+
+// POST /resend-phone-otp   body: { phone, role? }
+const resendPhoneOTP = async (req, res) => {
+  try {
+    const { phone } = sendPhoneOtpSchema.parse(req.body);
+    const role = req.body.role
+      ? String(req.body.role).trim().toUpperCase()
+      : null;
+
+    if (role && !["ADMIN", "STORE", "USER"].includes(role)) {
+      return res.status(400).json({ status: false, message: "Invalid role" });
+    }
+
+    const accounts = await UserModel.find(role ? { phone, role } : { phone });
+    if (!accounts.length) {
+      return res
+        .status(404)
+        .json({ status: false, message: "Mobile number is not registered" });
+    }
+    if (accounts.every((a) => a.isVerified)) {
+      return res
+        .status(400)
+        .json({ status: false, message: "Mobile number is already verified" });
+    }
+
+    const result = await issuePhoneOtp(phone, "SIGNUP");
+    if (!result.ok) {
+      return res.status(result.status).json({
+        status: false,
+        message: result.message,
+        retryAfter: result.retryAfter,
+      });
+    }
+
+    return res
+      .status(200)
+      .json({ status: true, message: "OTP sent to your mobile number" });
+  } catch (error) {
+    if (error.name === "ZodError") {
+      const errors = error.issues.map((err) => ({
+        field: err.path.join("."),
+        message: err.message,
+      }));
+      return res.status(400).json({
+        status: false,
+        message: errors[0]?.message || "Validation failed",
+        errors,
+      });
+    }
+    console.error("Resend phone OTP error:", error);
+    return res.status(500).json({
+      status: false,
+      message: "Unable to send OTP, please try again later",
     });
   }
 };
@@ -325,7 +426,7 @@ const registerStoreOwner = async (req, res) => {
     const {
       name,
       email,
-      phone,
+      phone: rawPhone,
       password,
       storeName,
       storeType,
@@ -350,10 +451,17 @@ const registerStoreOwner = async (req, res) => {
       return;
     }
 
+    // phone required + 10-digit e normalize (invalid hole nijei 400 pathay)
+    const phone = requirePhone(res, rawPhone);
+    if (!phone) return;
+
     const normalizedEmail = normalizeEmail(email);
 
     if (await accountExists(normalizedEmail, "STORE")) {
       return roleConflict(res, "STORE");
+    }
+    if (await phoneExists(phone, "STORE")) {
+      return phoneConflict(res, "STORE");
     }
 
     const salt = await bcrypt.genSalt(10);
@@ -362,7 +470,7 @@ const registerStoreOwner = async (req, res) => {
     user = await UserModel.create({
       name: name.trim(),
       email: normalizedEmail,
-      phone: clean(phone),
+      phone,
       password: hashedPassword,
       role: "STORE",
     });
@@ -1569,12 +1677,15 @@ const registerUser = async (req, res) => {
     if (await accountExists(email, "USER")) {
       return roleConflict(res, "USER");
     }
+    if (await phoneExists(parsedData.phone, "USER")) {
+      return phoneConflict(res, "USER");
+    }
 
     const hashedPassword = await bcrypt.hash(parsedData.password, 10);
     const user = await UserModel.create({
       name: parsedData.name.trim(),
       email,
-      phone: parsedData.phone?.trim(),
+      phone: parsedData.phone,
       password: hashedPassword,
       role: "USER",
       provider: "LOCAL",
@@ -1584,20 +1695,15 @@ const registerUser = async (req, res) => {
         : [],
     });
 
-    let otpSent = true;
-    try {
-      await sendEmailVerificationOTP(req, user);
-    } catch (mailError) {
-      otpSent = false;
-      console.error("Verification OTP email error:", mailError);
-    }
+    const otpSent = await sendSignupOtp(user.phone);
 
     const { password: _password, ...safeUser } = user.toObject();
     return res.status(201).json({
       success: true,
       message: otpSent
-        ? "Registration successful. Verification OTP sent to your email."
-        : "Registration successful, but verification email could not be sent. Please try again later.",
+        ? "Registration successful. Verification OTP sent to your mobile number."
+        : "Registration successful, but the OTP could not be sent. Please request a new OTP.",
+      otpSent,
       user: safeUser,
     });
   } catch (error) {
@@ -1675,7 +1781,8 @@ module.exports = {
   verifyStoreStatus,
   createStore,
   updateStoreFeatured,
-  verifyEmailOTP,
+  verifyPhoneOTP,
+  resendPhoneOTP,
   storesBySubCategory,
   searchStoreNames,
   allStates,

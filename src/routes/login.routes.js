@@ -7,6 +7,8 @@ const {
   LogOut,
   updatePassword,
   continueWithGoogle,
+  sendLoginOtp, 
+  verifyLoginOtp
 } = require("../controller/login.controller.js");
 const {
   sendForgotPasswordOtp,
@@ -22,8 +24,18 @@ const {
   setDefaultAddress,
 } = require("../controller/address.controller.js");
 const verifyJwt = require("../middleware/verifiyUser.js");
+const rateLimit = require("express-rate-limit");
 
-router.post("/", login);
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many OTP requests. Try again later." },
+});
+
+router.post("/send-otp", sendLoginOtp);
+router.post("/verify-otp", verifyLoginOtp);
 router.get("/profile-page", verifyJwt, GetProfile);
 router.put("/profile-page", verifyJwt, updateProfile);
 router.post("/logout", verifyJwt, LogOut);

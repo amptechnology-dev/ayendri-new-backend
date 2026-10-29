@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const rateLimit = require("express-rate-limit");
 
 const {
   registerAdmin,
@@ -16,7 +17,8 @@ const {
   verifyStoreStatus,
   createStore,
   updateStoreFeatured,
-  verifyEmailOTP,
+  verifyPhoneOTP,
+  resendPhoneOTP,
   storesBySubCategory,
   searchStoreNames,
   allStates,
@@ -25,18 +27,27 @@ const {
   clearRecentSearches,
   relatedStores,
   nearbyStores,
-  generateStoreQrCode
+  generateStoreQrCode,
 } = require("../controller/register.controller.js");
 const verifyJwt = require("../middleware/verifiyUser.js");
 const authorize = require("../middleware/authorize.js");
 const { uploadMultiImages } = require("../middleware/multiMulter.js");
+
+const otpLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: "Too many OTP requests. Try again later." },
+});
 
 router.post("/create-admin", registerAdmin);
 // router.get("/all-admins", allAdmin);
 router.post("/create-user", uploadMultiImages, createUser);
 router.post("/register-owner", registerOwner);
 router.post("/register-user", registerUser);
-router.post("/verify-email-otp", verifyEmailOTP);
+router.post("/verify-phone-otp", otpLimiter, verifyPhoneOTP);
+router.post("/resend-phone-otp", otpLimiter, resendPhoneOTP);
 router.post("/register-store-owner", uploadMultiImages, registerStoreOwner);
 router.post("/create-store", verifyJwt, uploadMultiImages, createStore);
 router.get("/all-stores", allStores);

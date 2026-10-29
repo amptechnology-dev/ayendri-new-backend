@@ -21,7 +21,8 @@ const userSchema = new mongoose.Schema(
     name: { type: String, required: true },
     // unique: true shoriye deya hoyeche, uniqueness ekhon (email + role) index e
     email: { type: String, required: true, lowercase: true, trim: true },
-    phone: { type: String },
+    // login ekhon phone OTP diye, tai phone 10-digit normalized format e thake
+    phone: { type: String, trim: true },
     password: { type: String },
     role: {
       type: String,
@@ -45,6 +46,12 @@ const userSchema = new mongoose.Schema(
 
 // ekta email, ekta role e ekbar-i. Alada role e same email cholbe.
 userSchema.index({ email: 1, role: 1 }, { unique: true });
+
+// ekta phone, ekta role e ekbar-i. Phone nai / khali hole index e dhore na.
+userSchema.index(
+  { phone: 1, role: 1 },
+  { unique: true, partialFilterExpression: { phone: { $gt: "" } } },
+);
 
 const UserModel = model("User", userSchema);
 

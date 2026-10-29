@@ -1,12 +1,12 @@
-const mongoose = require("mongoose");
 const UserModel = require("../model/user.model.js");
 const StoreModel = require("../model/store.model.js");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { passwordGenerator } = require("../helper/PasswordGenerator.js");
-const { loginSchema, updateUserSchema } = require("../schema/user.schema.js");
-const uploadSingleImage = require("../helper/upload.js");
-const sendPasswordEmail = require("../helper/mail.service.js");
+const {
+  updateUserSchema,
+  sendPhoneOtpSchema,
+  verifyPhoneOtpSchema,
+} = require("../schema/user.schema.js");
 const transporter = require("../helper/emailtransporter.js");
 const { comparePassword } = require("../helper/comparePassword.js");
 const { OAuth2Client } = require("google-auth-library");
@@ -15,6 +15,11 @@ const {
   setAuthCookie,
   buildResponseUser,
 } = require("../helper/authToken");
+const {
+  issuePhoneOtp,
+  verifyPhoneOtpCode,
+  clearPhoneOtp,
+} = require("../helper/phoneOtp.js");
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -92,102 +97,144 @@ const continueWithGoogle = async (req, res) => {
 const ROLES = ["ADMIN", "STORE", "USER"];
 const ROLE_LABELS = { ADMIN: "Admin", STORE: "Store", USER: "User" };
 
-const login = async (req, res) => {
+const zodResponse = (res, error) => {
+  const errors = error.issues.map((err) => ({
+    field: err.path.join("."),
+    message: err.message,
+  }));
+  return res.status(400).json({
+    success: false,
+    message: errors[0]?.message || "Validation failed",
+    errors,
+  });
+};
+
+// zod schema unknown key strip kore dey, tai role / allowedRoles req.body theke pori
+// calling app (web portal: ADMIN + STORE) kon role gulo sign in korte pare seta restrict korte pare
+const readRoleScope = (body) => {
+  const role =
+    typeof body.role === "string" ? body.role.trim().toUpperCase() : null;
+
+  if (role && !ROLES.includes(role)) {
+    return { status: 400, error: "Invalid role" };
+  }
+
+  let allowedRoles = ROLES;
+  if (Array.isArray(body.allowedRoles) && body.allowedRoles.length) {
+    allowedRoles = body.allowedRoles
+      .map((r) => String(r).trim().toUpperCase())
+      .filter((r) => ROLES.includes(r));
+
+    if (!allowedRoles.length) {
+      return { status: 400, error: "Invalid allowed roles" };
+    }
+  }
+
+  if (role && !allowedRoles.includes(role)) {
+    return {
+      status: 403,
+      error: `${ROLE_LABELS[role]} accounts cannot sign in here`,
+    };
+  }
+
+  return { role, allowedRoles };
+};
+
+const findLoginAccounts = (phone, { role, allowedRoles }) =>
+  UserModel.find({ phone, role: role || { $in: allowedRoles } });
+
+const notRegisteredMessage = ({ role, allowedRoles }) => {
+  const label = role
+    ? ROLE_LABELS[role]
+    : allowedRoles.map((r) => ROLE_LABELS[r]).join(" or ");
+  return `This mobile number is not registered as ${label}`;
+};
+
+// POST /api/login/send-otp   body: { phone, allowedRoles?, role? }
+const sendLoginOtp = async (req, res) => {
   try {
-    const parsedData = loginSchema.parse(req.body);
-    const email = parsedData.email.trim().toLowerCase();
+    const { phone } = sendPhoneOtpSchema.parse(req.body);
 
-    // loginSchema may strip unknown keys, so role / allowedRoles are read from req.body
-    const role =
-      typeof req.body.role === "string"
-        ? req.body.role.trim().toUpperCase()
-        : null;
-
-    if (role && !ROLES.includes(role)) {
-      return res.status(400).json({ success: false, message: "Invalid role" });
+    const scope = readRoleScope(req.body);
+    if (scope.error) {
+      return res
+        .status(scope.status)
+        .json({ success: false, message: scope.error });
     }
 
-    // the calling app can restrict which roles may sign in (web portal: ADMIN + STORE)
-    let allowedRoles = ROLES;
-    if (Array.isArray(req.body.allowedRoles) && req.body.allowedRoles.length) {
-      allowedRoles = req.body.allowedRoles
-        .map((r) => String(r).trim().toUpperCase())
-        .filter((r) => ROLES.includes(r));
-
-      if (!allowedRoles.length) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid allowed roles" });
-      }
-    }
-
-    if (role && !allowedRoles.includes(role)) {
-      return res.status(403).json({
-        success: false,
-        message: `${ROLE_LABELS[role]} accounts cannot sign in here`,
-      });
-    }
-
-    const allAccounts = await UserModel.find({ email });
-    if (!allAccounts.length) {
+    // account na thakle SMS pathai na (SMS khoroch bachano)
+    const accounts = await findLoginAccounts(phone, scope);
+    if (!accounts.length) {
       return res
         .status(404)
-        .json({ success: false, message: "Email not found" });
+        .json({ success: false, message: notRegisteredMessage(scope) });
     }
 
-    const accounts = allAccounts.filter((a) =>
-      role ? a.role === role : allowedRoles.includes(a.role),
-    );
-    if (!accounts.length) {
-      const label = role
-        ? ROLE_LABELS[role]
-        : allowedRoles.map((r) => ROLE_LABELS[r]).join(" or ");
-      return res.status(404).json({
+    const result = await issuePhoneOtp(phone, "LOGIN");
+    if (!result.ok) {
+      return res.status(result.status).json({
         success: false,
-        message: `This email is not registered as ${label}`,
+        message: result.message,
+        retryAfter: result.retryAfter,
       });
     }
 
-    const withPassword = accounts.filter((a) => a.password);
-    if (!withPassword.length) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "This account was created with Google sign-in. Please continue with Google.",
-      });
-    }
+    return res.status(200).json({
+      success: true,
+      message: "OTP sent to your mobile number",
+    });
+  } catch (error) {
+    if (error.name === "ZodError") return zodResponse(res, error);
+    console.error("Send login OTP error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to send OTP. Please try again later.",
+    });
+  }
+};
 
-    // only accounts whose password matches are candidates
-    const matched = [];
-    for (const account of withPassword) {
-      if (await comparePassword(parsedData.password, account.password)) {
-        matched.push(account);
-      }
-    }
+// POST /api/login/verify-otp   body: { phone, otp, allowedRoles?, role? }
+const verifyLoginOtp = async (req, res) => {
+  try {
+    const { phone, otp } = verifyPhoneOtpSchema.parse(req.body);
 
-    if (!matched.length) {
+    const scope = readRoleScope(req.body);
+    if (scope.error) {
       return res
-        .status(401)
-        .json({ success: false, message: "Incorrect password" });
+        .status(scope.status)
+        .json({ success: false, message: scope.error });
     }
 
-    if (matched.length > 1) {
+    const accounts = await findLoginAccounts(phone, scope);
+    if (!accounts.length) {
+      return res
+        .status(404)
+        .json({ success: false, message: notRegisteredMessage(scope) });
+    }
+
+    const check = await verifyPhoneOtpCode(phone, "LOGIN", otp);
+    if (!check.ok) {
+      return res
+        .status(check.status)
+        .json({ success: false, message: check.message });
+    }
+
+    // ek phone e ekadhik role: OTP consume na kore role select korte bolo
+    if (accounts.length > 1) {
       return res.status(400).json({
         success: false,
-        message:
-          "Multiple accounts found for this email. Please select a role.",
+        message: "Multiple accounts found for this number. Please select a role.",
         requireRole: true,
-        roles: matched.map((a) => a.role),
+        roles: accounts.map((a) => a.role),
       });
     }
 
-    const user = matched[0];
+    const user = accounts[0];
 
-    if (!user.isVerified) {
-      return res.status(401).json({
+    if (user.isActive === false) {
+      return res.status(403).json({
         success: false,
-        status: false,
-        message: "Your account is not verified",
+        message: "Your account is inactive. Please contact support.",
       });
     }
 
@@ -219,6 +266,17 @@ const login = async (req, res) => {
       }
     }
 
+    // OTP diye phone owner proof hoye gelo, tai account verified dhora hoy
+    if (!user.isVerified) {
+      await UserModel.updateOne(
+        { _id: user._id },
+        { $set: { isVerified: true } },
+      );
+      user.isVerified = true;
+    }
+
+    await clearPhoneOtp(phone, "LOGIN");
+
     const token = generateAuthToken(user);
     setAuthCookie(res, token);
 
@@ -228,18 +286,8 @@ const login = async (req, res) => {
       user: buildResponseUser(user),
     });
   } catch (error) {
-    if (error.name === "ZodError") {
-      const errors = error.issues.map((err) => ({
-        field: err.path.join("."),
-        message: err.message,
-      }));
-      return res.status(400).json({
-        success: false,
-        message: errors[0]?.message || "Validation failed",
-        errors,
-      });
-    }
-    console.error("Login error:", error);
+    if (error.name === "ZodError") return zodResponse(res, error);
+    console.error("Verify login OTP error:", error);
     return res
       .status(500)
       .json({ success: false, message: "Error logging in user" });
@@ -253,8 +301,6 @@ const LogOut = async (req, res) => {
     if (!userId) {
       return res.status(401).json({ message: "Unauthorized" });
     }
-
-    const user = await UserModel.findById(userId);
 
     res.clearCookie("login-token", {
       httpOnly: true,
@@ -276,7 +322,6 @@ const LogOut = async (req, res) => {
 const GetProfile = async (req, res) => {
   try {
     const userId = req.user.id;
-    console.log("User ID from token:", userId);
     const user = await UserModel.findById(userId)
       .select("-password")
       .select("-shiftType")
@@ -307,7 +352,7 @@ const updateProfile = async (req, res) => {
 
     const updateFields = {};
     if (name !== undefined) updateFields.name = name.trim();
-    if (phone !== undefined) updateFields.phone = phone.trim();
+    if (phone !== undefined) updateFields.phone = phone; // already normalized by schema
 
     if (Object.keys(updateFields).length === 0) {
       return res.status(400).json({
@@ -396,6 +441,12 @@ const updateProfile = async (req, res) => {
         })),
       });
     }
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "This mobile number is already registered for this role",
+      });
+    }
     console.error("Update profile error:", error);
     return res.status(500).json({
       success: false,
@@ -428,7 +479,8 @@ const updatePassword = async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    const isMatch = comparePassword(oldPassword, user.password);
+    // [FIX] await chilo na, Promise truthy hoy tai je kono old password cholto
+    const isMatch = await comparePassword(oldPassword, user.password);
     if (!isMatch) {
       return res.status(400).json({ message: "Old password is incorrect" });
     }
@@ -465,7 +517,6 @@ const resetpasswordlink = async (req, res) => {
     const token = jwt.sign({ userID: user._id }, secret, {
       expiresIn: process.env.TOKEN_EXPIRATION,
     });
-    console.log("My forget token...", token);
     // Reset Link and this link generate by frontend developer
     // FRONTEND_HOST_FORGETPASSWORD = http://localhost:3004/forgetpassword
     const resetLink = `${process.env.FRONTEND_URL}/${user._id}/${token}`;
@@ -538,7 +589,8 @@ const forgetPassword = async (req, res) => {
 };
 
 module.exports = {
-  login,
+  sendLoginOtp,
+  verifyLoginOtp,
   GetProfile,
   updateProfile,
   LogOut,
