@@ -7,6 +7,7 @@ const {
   createProductSchema,
   updateProductSchema,
 } = require("../schema/product.schema.js");
+const { parsePickupAddress } = require("../helper/pickupAddress.js");
 const { uploadToR2 } = require("../helper/upload.js");
 const sendProductVerifyEmail = require("../helper/sendProductVerifyEmail.js");
 const { validateProduct } = require("../helper/validateProduct.js");
@@ -54,6 +55,7 @@ const {
   parseProductPolicy,
   getPublicStoreSettings,
 } = require("../helper/productPolicy.js");
+const { sendPickupContactProductMail } = require("../helper/pickupMail.js");
 
 const policyErrorResponse = (res, error) =>
   res.status(400).json({
@@ -61,6 +63,50 @@ const policyErrorResponse = (res, error) =>
     message: "Validation failed",
     errors: [error],
   });
+
+// jodi age theke pickupErrorResponse import/define kora thake, shetar bodole eta rakho (ei file e chilo na)
+const pickupErrorResponse = (res, error) =>
+  res.status(400).json({
+    success: false,
+    message: "Validation failed",
+    errors: [
+      typeof error === "string"
+        ? { field: "pickupAddress", message: error }
+        : error,
+    ],
+  });
+
+// pickup address dile contact email must (mail jabe)
+const pickupEmailError = (address) =>
+  address && !String(address.email || "").trim()
+    ? {
+        field: "pickupAddress.email",
+        message: "Pickup contact email is required",
+      }
+    : null;
+
+const PICKUP_FIELDS = [
+  "contactName",
+  "phone",
+  "email",
+  "addressLine",
+  "area",
+  "city",
+  "state",
+  "pincode",
+];
+const pickupChanged = (oldA, newA) =>
+  PICKUP_FIELDS.some(
+    (f) => String(oldA?.[f] || "").trim() !== String(newA?.[f] || "").trim(),
+  );
+
+// fire-and-forget: kokhono response block / fail korbe na
+const mailPickupContact = async ({ product, address, isUpdate }) => {
+  const store = await StoreModel.findById(product.storeId)
+    .select("storeName storeUniqueId")
+    .lean();
+  await sendPickupContactProductMail({ product, store, address, isUpdate });
+};
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const toBool = (v) => String(v).trim().toLowerCase() === "true";
@@ -401,7 +447,10 @@ const createProduct = async (req, res) => {
     const policyResult = parseProductPolicy(body);
     if (policyResult.error) return policyErrorResponse(res, policyResult.error);
     Object.assign(data, policyResult.policy);
-    const createType = body.productType === "SERVICE" ? "SERVICE" : "PRODUCT";
+    const pickup = parsePickupAddress(body);
+    if (pickup.error) return pickupErrorResponse(res, pickup.error);
+    const pickupEmailErr = pickupEmailError(pickup.address);
+    if (pickupEmailErr) return pickupErrorResponse(res, pickupEmailErr);
     data.fastestDelivery =
       data.productType !== "SERVICE" && toBool(body.fastestDelivery);
 
@@ -448,8 +497,8 @@ const createProduct = async (req, res) => {
       isVerified: true,
       hasVariants,
       hasColor,
-      ...data, // [GST] data.gst + data.gstInclusive eikhane diye jay
-      // [STOCK] data er por rakhlam jate validateProduct er kono value eta override na kore
+      ...data,
+      pickupAddress: pickup.address,
       hasStockManagement: stockEnabled,
       isMadeForProduct: !stockEnabled,
     });
@@ -460,6 +509,16 @@ const createProduct = async (req, res) => {
       : false;
 
     await product.save();
+
+    // [PICKUP MAIL] product save hoye gele pickup contact ke mail (fire-and-forget,
+    // mail fail korle product create block / fail hobe na)
+    if (pickup.address?.email) {
+      mailPickupContact({
+        product,
+        address: pickup.address,
+        isUpdate: false,
+      }).catch((e) => console.error("Pickup product mail error:", e.message));
+    }
 
     // [STOCK] opening stock log shudhu stock managed product er jonno
     if (stockEnabled) {
@@ -589,7 +648,7 @@ const getAllProducts = async (req, res) => {
           hasVariants: 1,
           hasColor: 1,
           hasStockManagement: 1,
-          isMadeForProduct: 1, 
+          isMadeForProduct: 1,
           productType: 1,
           fastestDelivery: 1,
           isReturnable: 1,
@@ -603,6 +662,7 @@ const getAllProducts = async (req, res) => {
           deliveryTime: 1,
           isActive: 1,
           isVerified: 1,
+          pickupAddress: 1,
           storeId: 1,
           categoryId: 1,
           userId: 1,
@@ -952,6 +1012,24 @@ const updateProduct = async (req, res) => {
     });
     if (policyResult.error) return policyErrorResponse(res, policyResult.error);
     if (policyResult.policy) Object.assign(updateData, policyResult.policy);
+
+    const pickup = parsePickupAddress(body);
+    if (pickup.error) return pickupErrorResponse(res, pickup.error);
+    const pickupEmailErr = pickupEmailError(pickup.address);
+    if (pickupEmailErr) return pickupErrorResponse(res, pickupEmailErr);
+
+    // [PICKUP] ekhon PRODUCT ar SERVICE duitar-i pickup address thakte pare
+    let pickupMailAddress = null;
+    if (pickup.clear) {
+      delete updateData.pickupAddress;
+      unsetFields.pickupAddress = "";
+    } else if (pickup.address) {
+      updateData.pickupAddress = pickup.address;
+      if (pickupChanged(existingProduct.pickupAddress, pickup.address)) {
+        pickupMailAddress = pickup.address;
+      }
+    }
+
     if (body.fastestDelivery !== undefined) {
       updateData.fastestDelivery = toBool(body.fastestDelivery);
     }
@@ -973,6 +1051,14 @@ const updateProduct = async (req, res) => {
       },
       { new: true, runValidators: true },
     );
+
+    if (pickupMailAddress?.email) {
+      mailPickupContact({
+        product: updatedProduct,
+        address: pickupMailAddress,
+        isUpdate: true,
+      }).catch((e) => console.error("Pickup product mail error:", e.message));
+    }
 
     // ---------- log stock deltas + notify if newly low ----------
     // [STOCK] shudhu stock managed product er jonno
@@ -1076,6 +1162,7 @@ const getSingleProduct = async (req, res) => {
     }
 
     const product = await ProductModel.findOne({ _id: id, isActive: true })
+      .select("-pickupAddress")
       .populate(
         "storeId",
         "storeName storeUniqueId contactNo whatsappNo email isActive isVerify",
@@ -1101,12 +1188,45 @@ const getSingleProduct = async (req, res) => {
   }
 };
 
+const getProductPickupAddress = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+    const userId = req.user?._id || req.user?.id;
+    const product = await ProductModel.findOne({ _id: id, userId })
+      .select("pickupAddress")
+      .lean();
+    if (!product) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    }
+    return res
+      .status(200)
+      .json({ success: true, pickupAddress: product.pickupAddress || null });
+  } catch (error) {
+    console.error("Get Pickup Address Error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
 const verifyStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { isVerify } = req.body;
     if (!id) {
       return res.status(400).json({ message: "Product ID is required" });
+    }
+    if (typeof isVerify !== "boolean") {
+      return res
+        .status(400)
+        .json({ success: false, message: "isVerify must be true or false" });
     }
 
     const product = await ProductModel.findById(id);
@@ -1233,7 +1353,7 @@ const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt productType fastestDelivery isReturnable returnDays isReplaceable replaceDays isRefundable refundDays";
+  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt productType fastestDelivery isReturnable returnDays isReplaceable replaceDays isRefundable refundDays pickupAddress";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -1264,7 +1384,7 @@ const getPublicStore = (storeUniqueId) =>
 // [GST] withEffectiveGst: gst (normalized), gstInclusive, variant/size e effectiveGst.
 // Eikhane rakhar karone getStoreProducts, getStoreProductsByCategory, getStoreSingleProduct
 // (related products shoho) shob jaygay automatic GST info jabe.
-const formatProduct = ({ categoryId, ...product }) => ({
+const formatProduct = ({ categoryId, pickupAddress, ...product }) => ({
   ...withEffectiveGst(product),
   categoryId: categoryId?._id ?? null,
   category: categoryId?._id
@@ -1312,21 +1432,48 @@ const unitPriceFor = (p, variantId) => {
   return getListingPrice(p);
 };
 
-const productTypeOf = (p) => (p?.productType === "SERVICE" ? "SERVICE" : "PRODUCT");
+const productTypeOf = (p) =>
+  p?.productType === "SERVICE" ? "SERVICE" : "PRODUCT";
 
 const buildDeliveryPicker = async ({ storeId, pincode, country, products }) => {
-  // store delivery ekbar-i check (normal + dorkar hole fastest), tarpor proti product e alada hishab
-  const baseRes = await getDeliveryResult({ storeId, pincode, country });
-  const hasFast = products.some((p) => p.fastestDelivery);
-  const fastRes = hasFast
-    ? await getDeliveryResult({ storeId, pincode, country, fastest: true })
-    : baseRes;
+  // [PICKUP] same pickup pincode + fastest flag combination ekbar-i hishab hoy
+  const cache = new Map();
+  const resultFor = (pickupPincode, fastest) => {
+    const ck = `${pickupPincode || ""}|${fastest ? 1 : 0}`;
+    if (!cache.has(ck)) {
+      cache.set(
+        ck,
+        getDeliveryResult({
+          storeId,
+          pincode,
+          country,
+          fastest,
+          pickupPincode: pickupPincode || undefined,
+        }),
+      );
+    }
+    return cache.get(ck);
+  };
 
-  const base = buildSummary(baseRes); // store-level summary (product price chhara)
+  const baseRes = await resultFor("", false);
+  const base = buildSummary(baseRes);
+
+  const perProduct = new Map();
+  await Promise.all(
+    products.map(async (p) => {
+      perProduct.set(
+        String(p._id),
+        await resultFor(
+          p?.productType === "SERVICE" ? "" : p?.pickupAddress?.pincode,
+          p?.fastestDelivery === true,
+        ),
+      );
+    }),
+  );
 
   const pick = (p) =>
-    buildSummary(p?.fastestDelivery ? fastRes : baseRes, {
-      itemsTotal: p ? getListingPrice(p) : null, // price na thakle (price on request) shudhu base charge
+    buildSummary(perProduct.get(String(p?._id)) || baseRes, {
+      itemsTotal: p ? getListingPrice(p) : null,
       productType: productTypeOf(p),
     });
 
@@ -1574,7 +1721,7 @@ const getStoreProducts = async (req, res) => {
     // [GST] [FAST] PRODUCT_LIST_FIELDS e gst, gstInclusive, fastestDelivery ache
     let products = await ProductModel.find(match)
       .select(
-        `${PRODUCT_LIST_FIELDS} stock hasVariants hasColor hasStockManagement reviews averageRating totalReviews`,
+        `${PRODUCT_LIST_FIELDS} stock hasVariants hasColor hasStockManagement isMadeForProduct reviews averageRating totalReviews`,
       )
       .populate("categoryId", "name")
       .populate({ path: "reviews.userId", select: "name picture" })
@@ -1768,7 +1915,8 @@ const getStoreSingleProduct = async (req, res) => {
 
     // [NEW] order value = selected variant er price x quantity
     const unit = unitPriceFor(product, variantId);
-    const itemsTotal = unit !== null ? Math.round(unit * quantity * 100) / 100 : null;
+    const itemsTotal =
+      unit !== null ? Math.round(unit * quantity * 100) / 100 : null;
 
     const [related, productDelivery, storeSettings] = await Promise.all([
       // related products er jonno (default weight), [FAST] proti product er flag onujayi
@@ -1785,8 +1933,12 @@ const getStoreSingleProduct = async (req, res) => {
         country: req.query.country,
         parcel,
         fastest: product.fastestDelivery === true,
-        itemsTotal, // [NEW]
-        productType: productTypeOf(product), // [NEW]
+        itemsTotal,
+        productType: productTypeOf(product),
+        pickupPincode:
+          product.productType === "SERVICE"
+            ? undefined
+            : product.pickupAddress?.pincode, // [PICKUP]
       }),
       getPublicStoreSettings(store._id),
     ]);
@@ -1827,4 +1979,5 @@ module.exports = {
   getStoreProducts,
   getStoreProductsByCategory,
   getStoreSingleProduct,
+  getProductPickupAddress,
 };

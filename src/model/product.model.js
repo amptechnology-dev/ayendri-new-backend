@@ -1,6 +1,21 @@
 const mongoose = require("mongoose");
 const { getNextSequence } = require("../helper/counter.js");
 
+const pickupAddressSchema = new mongoose.Schema(
+  {
+    contactName: { type: String, required: true, trim: true },
+    phone: { type: String, required: true, trim: true },
+    email: { type: String, trim: true },
+    addressLine: { type: String, required: true, trim: true },
+    area: { type: String, trim: true },
+    city: { type: String, required: true, trim: true },
+    state: { type: String, required: true, trim: true },
+    pincode: { type: String, required: true, trim: true, match: /^\d{6}$/ },
+    country: { type: String, default: "India", trim: true },
+  },
+  { _id: false },
+);
+
 const packagingDetailsSchema = new mongoose.Schema(
   {
     expectedDeliveryDays: { type: Number, min: 0 },
@@ -166,6 +181,7 @@ const productSchema = new mongoose.Schema(
       index: true,
     },
     fastestDelivery: { type: Boolean, default: false },
+    pickupAddress: { type: pickupAddressSchema, default: undefined },
     isReturnable: { type: Boolean, default: false },
     returnDays: { type: Number, default: null, min: 1 },
     isReplaceable: { type: Boolean, default: false },

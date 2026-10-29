@@ -14,6 +14,7 @@ const {
 } = require("../helper/deliveryEstimate.js");
 const {
   ensurePickupLocation,
+  ensureAddressPickupLocation,
   PickupSetupError,
 } = require("../helper/pickupLocation.js");
 const {
@@ -27,6 +28,9 @@ const ProductModel = require("../model/product.model.js");
 const shiprocket = require("../helper/shiprocket.js");
 const { notifyUserOrderStatus } = require("../helper/notification.helper.js");
 const { getStorePolicy } = require("../helper/storePolicy.js");
+const {
+  sendPickupContactShipmentMail,
+} = require("../helper/pickupMail.js");
 
 const parseDate = (v) => {
   if (!v) return null;
@@ -333,6 +337,7 @@ const checkDelivery = async (req, res) => {
 
     // product dile oi product er packaging theke weight + size
     let parcel = null;
+    let pickupPincode;
     const { productId } = req.query;
     if (productId && mongoose.isValidObjectId(productId)) {
       const product = await ProductModel.findOne({
@@ -341,12 +346,17 @@ const checkDelivery = async (req, res) => {
         isActive: true,
       })
         .select(
-          "name productType packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
+          "name productType pickupAddress packagingDetails variants._id variants.packagingDetails variants.sizeVariants._id variants.sizeVariants.packagingDetails",
         )
         .lean();
 
       if (product) {
         productType = product.productType === "SERVICE" ? "SERVICE" : "PRODUCT";
+
+        pickupPincode =
+          product.productType === "SERVICE"
+            ? undefined
+            : product.pickupAddress?.pincode;
 
         const rawVariant = String(req.query.variantId || "").trim();
         const variantId =
@@ -371,6 +381,7 @@ const checkDelivery = async (req, res) => {
       parcel,
       cod,
       policy,
+      pickupPincode,
     });
 
     const info =
@@ -492,7 +503,9 @@ const createShiprocketShipment = async (req, res) => {
         .json({ success: false, message: "Invalid order id" });
     }
 
-    const order = await OrderModel.findById(orderId).lean();
+    const order = await OrderModel.findById(orderId)
+      .select("+pickupAddress")
+      .lean();
     if (!order) {
       return res
         .status(404)
@@ -568,12 +581,16 @@ const createShiprocketShipment = async (req, res) => {
               .lean(),
       ]);
 
-      // [PICKUP] store er nijer pickup address (Shiprocket e na thakle auto-create hoy)
-      const pickupLocation = await ensurePickupLocation({
-        storeId: order.storeId,
-        ownerName: owner?.name,
-        ownerEmail: owner?.email,
-      });
+      const pickupLocation = order.pickupAddress?.pincode
+        ? await ensureAddressPickupLocation(order.pickupAddress, {
+            ownerEmail: owner?.email,
+            ownerName: owner?.name,
+          })
+        : await ensurePickupLocation({
+            storeId: order.storeId,
+            ownerName: owner?.name,
+            ownerEmail: owner?.email,
+          });
 
       if (!parcel) {
         // purono order (parcel snapshot nei): ekhon product theke hishab
@@ -719,7 +736,8 @@ const createShiprocketShipment = async (req, res) => {
     }
 
     // ---------- Step C: pickup request ----------
-    let pickupError = null;
+       let pickupError = null;
+    let pickupJustRequested = false; // [MAIL] shudhu ei call e notun pickup hole mail
     if (!shipment.pickupRequestedAt) {
       try {
         const pr = await shiprocket.generatePickup(shipment.shipmentId);
@@ -735,6 +753,7 @@ const createShiprocketShipment = async (req, res) => {
               : null,
           status: "PICKUP_SCHEDULED",
         };
+        pickupJustRequested = true;
       } catch (err) {
         if (/already/i.test(err.message || "")) {
           shipment = { ...shipment, pickupRequestedAt: new Date() };
@@ -750,7 +769,16 @@ const createShiprocketShipment = async (req, res) => {
     }
     await OrderModel.updateOne({ _id: orderId }, { $set: set });
 
+     if (pickupJustRequested && order.pickupAddress?.email) {
+      sendPickupContactShipmentMail({
+        order,
+        shipment,
+        address: order.pickupAddress,
+      }).catch((e) => console.error("Pickup shipment mail error:", e.message));
+    }
+
     const updated = await OrderModel.findById(orderId)
+      .select("+pickupAddress")
       .populate("userId", "name phone email")
       .lean();
 
@@ -927,7 +955,10 @@ const getShippingCostReport = async (req, res) => {
     else if (booked === "false") listMatch["shipment.awb"] = null;
 
     const pageNum = Math.max(parseInt(req.query.page) || 1, 1);
-    const limitNum = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+    const limitNum = Math.min(
+      Math.max(parseInt(req.query.limit) || 10, 1),
+      100,
+    );
 
     const RATE = { $ifNull: ["$deliveryInfo.courierRate", 0] };
     const PAID = { $ifNull: ["$shippingCharge", 0] };
@@ -1004,7 +1035,8 @@ const getShippingCostReport = async (req, res) => {
         storeName: o.storeName,
         status: o.status,
         paymentMethod: o.paymentMethod,
-        courierName: o.shipment?.courierName || o.deliveryInfo?.courierName || null,
+        courierName:
+          o.shipment?.courierName || o.deliveryInfo?.courierName || null,
         courierMode: o.deliveryInfo?.courierMode || null,
         awb: o.shipment?.awb || null,
         shipmentStatus: o.shipment?.status || null,
@@ -1040,5 +1072,5 @@ module.exports = {
   getMyPincode,
   createShiprocketShipment,
   courierWebhook,
-  getShippingCostReport 
+  getShippingCostReport,
 };

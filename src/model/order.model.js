@@ -12,6 +12,22 @@ const ORDER_STATUSES = [
 const PAYMENT_METHODS = ["COD", "ONLINE"];
 const PAYMENT_STATUSES = ["PENDING", "INITIATED", "PAID", "FAILED", "REFUNDED"];
 
+// order place er somoy je address theke pickup hobe tar snapshot
+const pickupAddressSchema = new mongoose.Schema(
+  {
+    contactName: String,
+    phone: String,
+    email: String,
+    addressLine: String,
+    area: String,
+    city: String,
+    state: String,
+    pincode: String,
+    country: { type: String, default: "India" },
+  },
+  { _id: false },
+);
+
 const gstRatesSchema = new mongoose.Schema(
   {
     cgst: { type: Number, default: null },
@@ -266,6 +282,21 @@ const paymentAttemptSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const orderPickupSchema = new mongoose.Schema(
+  {
+    contactName: String,
+    phone: String,
+    email: String,
+    addressLine: String,
+    area: String,
+    city: String,
+    state: String,
+    pincode: String,
+    country: { type: String, default: "India" },
+  },
+  { _id: false },
+);
+
 const orderSchema = new mongoose.Schema(
   {
     orderNumber: { type: String, unique: true },
@@ -321,6 +352,7 @@ const orderSchema = new mongoose.Schema(
     paymentOff: { type: Boolean, default: false },
     shipment: { type: shipmentSchema, default: null },
     parcel: { type: parcelSchema, default: null },
+    pickupAddress: { type: pickupAddressSchema, default: null, select: false },
     // ---------- payment ----------
     paymentMethod: { type: String, enum: PAYMENT_METHODS, default: "COD" },
     paymentStatus: {

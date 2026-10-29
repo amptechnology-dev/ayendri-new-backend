@@ -16,6 +16,7 @@ const {
   getStoreProducts,
   getStoreProductsByCategory,
   getStoreSingleProduct,
+  getProductPickupAddress
 } = require("../controller/product.controller.js");
 
 // ---------- STORE (authenticated) ----------
@@ -52,5 +53,11 @@ router.get(
 );
 router.get("/store/:storeUniqueId/products", getStoreProducts);
 router.get("/store/:storeUniqueId/products/:productId", getStoreSingleProduct);
+router.get(
+  "/pickup-address/:id",
+  verifyJwt,
+  authorize("STORE"),
+  getProductPickupAddress,
+);
 
 module.exports = router;

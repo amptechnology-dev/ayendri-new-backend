@@ -24,6 +24,8 @@ const {
   logStockChange,
   findUnitStock,
 } = require("../helper/stockManager.js");
+const { pickupGroupKey, plainPickup } = require("../helper/pickupAddress.js");
+const { sendPickupContactOrderMail } = require("../helper/pickupMail.js");
 const {
   notifyNewOrder,
   notifyOrderCancelled,
@@ -68,6 +70,7 @@ const {
 const { OrderRequestModel } = require("../model/orderRequest.model.js");
 const { checkCancelRefund } = require("../helper/orderRefund.js");
 const { snapshotPolicy } = require("../helper/productPolicy.js");
+
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -194,6 +197,53 @@ const rollbackLines = (lines) =>
     ),
   );
 
+// [PICKUP] customer ke pathanor age store er pickup address muche dao
+const publicOrder = (o) => {
+  const obj = typeof o?.toObject === "function" ? o.toObject() : { ...o };
+  delete obj.pickupAddress;
+  return obj;
+};
+
+const notifyPickupContact = (order, { force = false } = {}) => {
+  if (!order) return;
+  const readyNow = order.paymentMethod === "COD" || order.paymentOff === true;
+  if (!readyNow && !force) return;
+
+  sendPickupContactOrderMail({ order }).catch((e) =>
+    console.error("Pickup order mail error:", e.message),
+  );
+};
+
+const groupLinesForCheckout = async (items) => {
+  const ids = [...new Set(items.map((i) => String(i.productId)))];
+  const docs = await ProductModel.find({ _id: { $in: ids } })
+    .select("pickupAddress productType")
+    .lean();
+  const pMap = new Map(docs.map((p) => [String(p._id), p]));
+
+  const groups = new Map();
+  for (const item of items) {
+    const p = pMap.get(String(item.productId));
+    const pk = pickupGroupKey(p?.pickupAddress);
+    const key = `${item.storeId}|${pk}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        storeId: String(item.storeId),
+        lines: [],
+        itemIds: [],
+      });
+    }
+    const g = groups.get(key);
+    g.lines.push({
+      productId: item.productId,
+      variantId: item.variantId,
+      quantity: item.quantity,
+    });
+    g.itemIds.push(item._id);
+  }
+  return [...groups.values()];
+};
+
 // ===================== INTERNAL HELPER =====================
 
 const linesParcel = (lines, productMap) =>
@@ -243,6 +293,33 @@ const attemptStoreCheckout = async ({
   const hasService = lines.some(
     (l) => productMap.get(String(l.productId))?.productType === "SERVICE",
   );
+
+  // [CHANGE] PRODUCT + SERVICE duitar pickup address ekhon order e snapshot hobe
+  const lineProducts = lines
+    .map((l) => productMap.get(String(l.productId)))
+    .filter(Boolean);
+
+  const pickupKeys = new Set(
+    lineProducts.map((p) => pickupGroupKey(p.pickupAddress)),
+  );
+  if (pickupKeys.size > 1) {
+    return {
+      success: false,
+      storeId,
+      code: "MULTIPLE_PICKUP",
+      message:
+        "Items in this order are picked up from different addresses. Please order them separately",
+    };
+  }
+  // order e snapshot (mail + WhatsApp + shipment er jonno)
+  const pickupAddress = plainPickup(lineProducts.find((p) => p.pickupAddress));
+
+  // [CHANGE] delivery estimate / courier rate e shudhu PRODUCT er pickup pincode jabe.
+  // Service e courier lage na, ar custom pickup dile LOCAL delivery bondho hoye jeto
+  const shippingPickupPincode = lineProducts.find(
+    (p) => p.productType !== "SERVICE" && p.pickupAddress?.pincode,
+  )?.pickupAddress?.pincode;
+
   // [PAYMENT] store er payment mode onujayi payment method thik kora
   const policy = await getStorePolicy(storeId);
   const payment = resolvePaymentForStore(policy, paymentMethod);
@@ -269,6 +346,7 @@ const attemptStoreCheckout = async ({
     cod: effectiveMethod === "COD" && !paymentOff,
     policy,
     fastest: wantsFastest,
+    pickupPincode: shippingPickupPincode, // [CHANGE]
   });
   if (!delivery.deliverable) {
     return {
@@ -447,7 +525,7 @@ const attemptStoreCheckout = async ({
   // tarpor items + shipping = customer er total payable (PayU eta-i nibe)
   const itemsTotal = totalAmount;
 
-  // [NEW] product / service alada subtotal (price x quantity, GST soho).
+  // product / service alada subtotal (price x quantity, GST soho).
   // proti type nijer rule e check hoy, tai cart e mix thakleo thik kaj kore
   const totalsByType = {};
   for (const i of gstItems) {
@@ -456,7 +534,8 @@ const attemptStoreCheckout = async ({
         ? "SERVICE"
         : "PRODUCT";
     totalsByType[type] = round2(
-      (totalsByType[type] || 0) + Number(i.lineTotalWithGst ?? i.lineTotal ?? 0),
+      (totalsByType[type] || 0) +
+        Number(i.lineTotalWithGst ?? i.lineTotal ?? 0),
     );
   }
 
@@ -523,6 +602,7 @@ const attemptStoreCheckout = async ({
       deliveryAddress,
       deliveryInfo: shippingInfo,
       parcel: policy.hasDelivery ? parcel : null,
+      pickupAddress,
       note,
       hasService,
       bookingDate:
@@ -612,8 +692,6 @@ const restoreOrderStock = async (order, userId) => {
   );
 };
 
-// ===================== 1. CHECKOUT FROM CART (multi-store) =====================
-// POST /api/order/checkout
 const checkout = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -645,70 +723,49 @@ const checkout = async (req, res) => {
         .json({ success: false, message: "No items to checkout" });
     }
 
-    // ---------- store wise group ----------
-    const groups = new Map();
-    for (const item of items) {
-      const key = String(item.storeId);
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key).push({
-        productId: item.productId,
-        variantId: item.variantId,
-        quantity: item.quantity,
-      });
-    }
+    // [PICKUP] store + pickup address wise group
+    const groups = await groupLinesForCheckout(items);
 
     const createdOrders = [];
     const failedStores = [];
-    const successfulStoreIds = [];
+    const successfulItemIds = [];
 
-    // ---------- protyek store independently checkout hoy ----------
-    for (const [storeId, lines] of groups.entries()) {
+    for (const group of groups) {
       try {
         const result = await attemptStoreCheckout({
           userId,
-          storeId,
-          lines,
+          storeId: group.storeId,
+          lines: group.lines,
           deliveryAddress,
           note,
-          bookingDate, // [BOOKING] shob store er order e same booking date
+          bookingDate,
           paymentMethod,
         });
 
         if (result.success) {
           createdOrders.push(result.order);
-          successfulStoreIds.push(storeId);
+          successfulItemIds.push(...group.itemIds);
         } else {
           failedStores.push({
-            storeId,
+            storeId: group.storeId,
             message: result.message,
             outOfStockLines: result.outOfStockLines,
           });
         }
       } catch (err) {
-        // ekta store e unexpected error hole baki store der jeno atke na jay
-        console.error(`Checkout failed for store ${storeId}:`, err);
+        console.error(`Checkout failed for store ${group.storeId}:`, err);
         failedStores.push({
-          storeId,
+          storeId: group.storeId,
           message: "Could not place order for this store",
         });
       }
     }
 
-    // ---------- successful store er item gulo cart theke remove ----------
-    if (successfulStoreIds.length > 0) {
+    // shudhu successful item gulo cart theke remove
+    if (successfulItemIds.length > 0) {
       await CartModel.updateOne(
         { _id: cartId, userId },
-        {
-          $pull: {
-            items: {
-              storeId: {
-                $in: successfulStoreIds.map(
-                  (id) => new mongoose.Types.ObjectId(id),
-                ),
-              },
-            },
-          },
-        },
+        { $pull: { items: { _id: { $in: successfulItemIds } } } },
       );
     }
 
@@ -723,6 +780,7 @@ const checkout = async (req, res) => {
     for (const order of createdOrders) {
       notifyNewOrder(order);
       notifyUserOrderStatus(order);
+      notifyPickupContact(order); // [MAIL]
     }
 
     return res.status(201).json({
@@ -731,7 +789,7 @@ const checkout = async (req, res) => {
         failedStores.length > 0
           ? "Order placed for some stores; others could not be completed"
           : "Order(s) placed successfully",
-      orders: createdOrders,
+      orders: createdOrders.map(publicOrder), // [PICKUP]
       failedStores: failedStores.length > 0 ? failedStores : undefined,
     });
   } catch (error) {
@@ -739,8 +797,6 @@ const checkout = async (req, res) => {
   }
 };
 
-// ===================== 2. DIRECT "BUY NOW" CHECKOUT =====================
-// POST /api/order/buy-now
 const buyNow = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -785,11 +841,12 @@ const buyNow = async (req, res) => {
 
     notifyNewOrder(result.order);
     notifyUserOrderStatus(result.order);
+    notifyPickupContact(result.order); // [MAIL]
 
     return res.status(201).json({
       success: true,
       message: "Order placed successfully",
-      order: result.order,
+      order: publicOrder(result.order),
     });
   } catch (error) {
     return handleError(res, error, "Buy Now Error");
@@ -813,6 +870,7 @@ const getOrdersGroupedByStore = async (
 
   const pipeline = [
     { $match: match },
+    { $project: { pickupAddress: 0 } }, // [PICKUP]
     { $sort: { createdAt: -1, _id: -1 } },
     {
       $group: {
@@ -1296,6 +1354,7 @@ const getStoreOrderById = async (req, res) => {
     }
 
     const order = await OrderModel.findById(orderId)
+      .select("+pickupAddress")
       .populate("userId", CUSTOMER_FIELDS)
       .lean();
     if (!order) {
@@ -1752,8 +1811,7 @@ const checkoutPreview = async (req, res) => {
         String(addr.country ?? req.body?.country ?? "India").trim() || "India",
     };
 
-    // ---------- store wise lines (checkout / buyNow er moto) ----------
-    const groups = new Map();
+    let groupList = [];
 
     if (cartId) {
       if (!mongoose.isValidObjectId(cartId)) {
@@ -1773,15 +1831,7 @@ const checkoutPreview = async (req, res) => {
         const set = new Set(storeIds.map(String));
         items = items.filter((i) => set.has(String(i.storeId)));
       }
-      for (const item of items) {
-        const key = String(item.storeId);
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push({
-          productId: item.productId,
-          variantId: item.variantId,
-          quantity: item.quantity,
-        });
-      }
+      groupList = await groupLinesForCheckout(items); // [PICKUP]
     } else if (productId) {
       if (!mongoose.isValidObjectId(productId)) {
         return res
@@ -1800,13 +1850,18 @@ const checkoutPreview = async (req, res) => {
           .status(404)
           .json({ success: false, message: "Product not available" });
       }
-      groups.set(String(product.storeId), [
+      groupList = [
         {
-          productId,
-          variantId: cleanVariantId(variantId),
-          quantity: Math.max(1, Number(quantity) || 1),
+          storeId: String(product.storeId),
+          lines: [
+            {
+              productId,
+              variantId: cleanVariantId(variantId),
+              quantity: Math.max(1, Number(quantity) || 1),
+            },
+          ],
         },
-      ]);
+      ];
     } else {
       return res.status(400).json({
         success: false,
@@ -1814,19 +1869,19 @@ const checkoutPreview = async (req, res) => {
       });
     }
 
-    if (groups.size === 0) {
+    if (groupList.length === 0) {
       return res
         .status(400)
         .json({ success: false, message: "No items to checkout" });
     }
 
     const stores = [];
-    for (const [storeId, lines] of groups.entries()) {
+    for (const g of groupList) {
       stores.push(
         await previewStore({
           userId,
-          storeId,
-          lines,
+          storeId: g.storeId,
+          lines: g.lines,
           deliveryAddress,
           paymentMethod,
         }),
@@ -1843,11 +1898,9 @@ const checkoutPreview = async (req, res) => {
       itemsTotal: sum("itemsTotal"),
       totalShipping: sum("shippingCharge"),
       grandTotal: sum("grandTotal"),
-      // kono store e COD na thakle pura checkout e COD dekhano jabe na
       codAvailable: stores.every((s) => s.codAvailable),
-      // shob store e payment OFF hole payment step-i lagbe na
       paymentRequired: stores.some((s) => s.onlineAvailable),
-      stores,
+      stores, // alada pickup hole ekই store ekadhik bar thakte pare
     });
   } catch (error) {
     return handleError(res, error, "Checkout Preview Error");
@@ -1881,7 +1934,7 @@ const ymdAfterMinutesIST = (minutes) =>
 // order er jonno Shiprocket theke courier ene maxDays + mode diye filter
 const buildShippingOptions = async (order, { maxDays, mode }) => {
   const cfg = await getStoreDeliveryCfg(order.storeId);
-  const pickupPostcode = cfg?.pincode;
+  const pickupPostcode = order.pickupAddress?.pincode || cfg?.pincode; 
   if (!pickupPostcode) {
     return {
       ok: false,
@@ -1946,7 +1999,9 @@ const getShippingOptions = async (req, res) => {
     }
     const { maxDays, mode } = shippingOptionsQuerySchema.parse(req.query);
 
-    const order = await OrderModel.findById(orderId).lean();
+    const order = await OrderModel.findById(orderId)
+      .select("+pickupAddress")
+      .lean();
     if (!order) {
       return res
         .status(404)
@@ -2161,4 +2216,5 @@ module.exports = {
   checkoutPreview,
   getShippingOptions,
   selectShippingOption,
+  notifyPickupContact, 
 };

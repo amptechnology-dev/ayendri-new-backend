@@ -184,11 +184,12 @@ const resolveNational = async ({
   parcel,
   cod,
   fastest = false,
+  pickupPostcode, // [PICKUP]
 }) => {
   if (shiprocket.isAvailable()) {
     try {
       const svc = await shiprocket.checkServiceability({
-        pickupPostcode: cfg.pincode,
+        pickupPostcode: pickupPostcode || cfg.pincode, // [PICKUP]
         deliveryPostcode: pin,
         weightKg,
         parcel,
@@ -263,6 +264,7 @@ const resolveInternational = async ({
   weightKg,
   parcel,
   fastest = false,
+  pickupPostcode,
 }) => {
   const countryCode = shiprocket.toCountryCode(country);
 
@@ -275,7 +277,7 @@ const resolveInternational = async ({
   if (shiprocket.isAvailable() && countryCode) {
     try {
       const svc = await shiprocket.checkInternationalServiceability({
-        pickupPostcode: cfg.pincode,
+        pickupPostcode: pickupPostcode || cfg.pincode,
         countryCode,
         weightKg,
         parcel,
@@ -435,6 +437,7 @@ const checkStoreDelivery = async ({
   cod = false,
   policy,
   fastest = false,
+  pickupPincode,
 }) => {
   const pol = policy || (await getStorePolicy(storeId));
 
@@ -448,6 +451,11 @@ const checkStoreDelivery = async ({
   }).lean();
 
   if (!cfg) return { deliverable: true, configured: false, info: null };
+
+  const pickupPin = isValidPincode(pickupPincode)
+    ? String(pickupPincode).trim()
+    : cfg.pincode;
+  const customPickup = pickupPin !== cfg.pincode;
 
   const pin = String(pincode || "").trim();
   const handlingMin = getHandlingMinutes(cfg);
@@ -481,6 +489,7 @@ const checkStoreDelivery = async ({
       weightKg: weight,
       parcel,
       fastest,
+      pickupPostcode: pickupPin, // [FIX]
     });
     return {
       deliverable: true,
@@ -500,7 +509,7 @@ const checkStoreDelivery = async ({
   const chargeRules = chargeRulesByType.PRODUCT; // purono code er jonno
 
   // ---------- LOCAL ----------
-  if (allowLocal && cfg.radiusKm) {
+  if (allowLocal && cfg.radiusKm && !customPickup) {
     let distanceKm = null;
 
     if (pin === cfg.pincode) {
@@ -537,6 +546,7 @@ const checkStoreDelivery = async ({
       parcel,
       cod,
       fastest,
+      pickupPostcode: pickupPin, // [FIX]
     });
 
     if (!national.serviceable) {
@@ -625,6 +635,7 @@ const getDeliveryResult = async ({
   country,
   parcel = null,
   fastest = false,
+  pickupPincode, // [PICKUP]
 }) => {
   const pin = String(pincode || "").trim();
   if (!pin) return null;
@@ -639,6 +650,7 @@ const getDeliveryResult = async ({
     parcel,
     policy,
     fastest,
+    pickupPincode, // [PICKUP]
   });
 };
 
@@ -650,6 +662,7 @@ const getDeliverySummary = async ({
   parcel = null,
   fastest = false,
   productType = "PRODUCT",
+  pickupPincode, // [PICKUP]
 }) => {
   const result = await getDeliveryResult({
     storeId,
@@ -657,6 +670,7 @@ const getDeliverySummary = async ({
     country,
     parcel,
     fastest,
+    pickupPincode,
   });
   return buildSummary(result, { itemsTotal, productType });
 };
@@ -673,7 +687,6 @@ module.exports = {
   finalizeShipping,
   formatDurationLabel,
   formatDeliveryLabel,
-  getDeliverySummary,
   getDeliverySummary,
   getDeliveryResult,
   buildSummary,
