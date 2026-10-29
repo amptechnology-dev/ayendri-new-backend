@@ -92,6 +92,11 @@ const BANNER_POPULATE = [
   { path: "productId", select: "name productCode images" },
 ];
 
+const applyPlatformFilter = (filter, isWebQuery) => {
+  if (isWebQuery === "true") filter.isWeb = true;
+  else if (isWebQuery === "false") filter.isWeb = { $ne: true };
+};
+
 // ===================== STORE (authenticated) =====================
 
 // form er product dropdown er jonno: ei store er product (category dile shudhu oi category gulor)
@@ -147,6 +152,7 @@ const createBanner = async (req, res) => {
     }
 
     const parsedData = createBannerSchema.parse(req.body);
+    const isWeb = parsedData.isWeb ?? false;
 
     const user = await UserModel.findById(userId);
     if (!user) {
@@ -194,7 +200,8 @@ const createBanner = async (req, res) => {
       return res.status(400).json({ success: false, message: linkError });
     }
 
-    const media = await uploadBannerMedia(req.files);
+    // isWeb onujayi media quality (web = high, phone = optimized)
+    const media = await uploadBannerMedia(req.files, { isWeb });
     if (!media) {
       return res
         .status(400)
@@ -207,6 +214,7 @@ const createBanner = async (req, res) => {
       categoryIds,
       productId: parsedData.productId || null,
       offerBanner: parsedData.offerBanner ?? false,
+      isWeb,
       image: media.url,
       mediaType: media.mediaType,
       userId,
@@ -334,6 +342,9 @@ const updateBanner = async (req, res) => {
     if (safeData.offerBanner !== undefined) {
       updateFields.offerBanner = safeData.offerBanner;
     }
+    if (safeData.isWeb !== undefined) {
+      updateFields.isWeb = safeData.isWeb;
+    }
     if (safeData.productId !== undefined) {
       updateFields.productId = safeData.productId; // null = remove
     }
@@ -378,8 +389,9 @@ const updateBanner = async (req, res) => {
       }
     }
 
-    // notun media dile replace, na dile purono ta thakbe
-    const media = await uploadBannerMedia(req.files);
+    // notun media dile replace (final isWeb onujayi quality), na dile purono ta thakbe
+    const effectiveIsWeb = updateFields.isWeb ?? existingBanner.isWeb ?? false;
+    const media = await uploadBannerMedia(req.files, { isWeb: effectiveIsWeb });
     if (media) {
       updateFields.image = media.url;
       updateFields.mediaType = media.mediaType;
@@ -442,11 +454,14 @@ const publicGetAllBanners = async (req, res) => {
   try {
     const availableStoreIds = await getAvailableStoreIds();
 
-    const banners = await BannerModel.find({
+    const filter = {
       isActive: true,
       offerBanner: { $ne: true },
       storeId: { $in: availableStoreIds },
-    })
+    };
+    applyPlatformFilter(filter, req.query.isWeb);
+
+    const banners = await BannerModel.find(filter)
       .populate(BANNER_POPULATE)
       .sort({ createdAt: -1 })
       .select("-userId -__v")
@@ -489,6 +504,7 @@ const publicGetOfferBanners = async (req, res) => {
     }
 
     if (categoryId) filter.categoryIds = categoryId;
+    applyPlatformFilter(filter, req.query.isWeb);
 
     const banners = await BannerModel.find(filter)
       .populate(BANNER_POPULATE)
@@ -539,6 +555,7 @@ const publicGetBannersByCategory = async (req, res) => {
     } else {
       filter.categoryIds = categoryId;
     }
+    applyPlatformFilter(filter, req.query.isWeb);
 
     const banners = await BannerModel.find(filter)
       .populate(BANNER_POPULATE)

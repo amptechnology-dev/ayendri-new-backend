@@ -40,6 +40,7 @@ const createBannerSchema = z.object({
   categoryIds: objectIdArray,
   productId: nullableObjectId,
   offerBanner: booleanField,
+  isWeb: booleanField,
 });
 
 const updateBannerSchema = createBannerSchema.partial();

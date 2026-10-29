@@ -19,6 +19,7 @@ const bannerSchema = new mongoose.Schema(
     isActive: { type: Boolean, default: true },
     // true hole eta offer banner (public offer API te ashbe + user ke notification jabe)
     offerBanner: { type: Boolean, default: false },
+    isWeb: { type: Boolean, default: false },
     storeId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",
