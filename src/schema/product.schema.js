@@ -21,7 +21,10 @@ const gstSchema = z
 
 // FormData te "false" string ashe, z.coerce.boolean("false") = true hoye jay, tai alada
 const boolish = z.preprocess(
-  (v) => (v === undefined || v === null || v === "" ? undefined : String(v).toLowerCase() === "true"),
+  (v) =>
+    v === undefined || v === null || v === ""
+      ? undefined
+      : String(v).toLowerCase() === "true",
   z.boolean().optional(),
 );
 
@@ -54,7 +57,15 @@ const createProductSchema = z.object({
   replaceDays: policyDays,
   isRefundable: boolish,
   refundDays: policyDays,
-
+  dailyBookingLimit: z.preprocess(
+    (v) => (v === "" || v === null || v === undefined ? undefined : v),
+    z.coerce
+      .number()
+      .int("Daily booking limit must be a whole number")
+      .min(1, "Daily booking limit must be at least 1")
+      .max(10000)
+      .optional(),
+  ),
   variants: z.array(z.record(z.any())).optional(),
 });
 

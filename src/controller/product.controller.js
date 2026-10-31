@@ -56,6 +56,7 @@ const {
   getPublicStoreSettings,
 } = require("../helper/productPolicy.js");
 const { sendPickupContactProductMail } = require("../helper/pickupMail.js");
+const BookingSlotModel = require("../model/bookingSlot.model.js");
 
 const policyErrorResponse = (res, error) =>
   res.status(400).json({
@@ -110,6 +111,30 @@ const mailPickupContact = async ({ product, address, isUpdate }) => {
 
 const escapeRegex = (str = "") => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const toBool = (v) => String(v).trim().toLowerCase() === "true";
+
+// [BOOKING LIMIT] faka = unlimited (null). Noile 1..10000 whole number
+const parseBookingLimit = (raw) => {
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return { value: null };
+  }
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > 10000) {
+    return {
+      error: {
+        field: "dailyBookingLimit",
+        message:
+          "Daily booking limit must be a whole number between 1 and 10000",
+      },
+    };
+  }
+  return { value: n };
+};
+
+const ymdAddDays = (ymd, n) => {
+  const d = new Date(`${ymd}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
 
 // [STOCK] stock management off hole stock field gulo shob level e 0 thakbe
 const zeroStock = (obj) => {
@@ -447,6 +472,13 @@ const createProduct = async (req, res) => {
     const policyResult = parseProductPolicy(body);
     if (policyResult.error) return policyErrorResponse(res, policyResult.error);
     Object.assign(data, policyResult.policy);
+    if (data.productType === "SERVICE") {
+      const bl = parseBookingLimit(body.dailyBookingLimit);
+      if (bl.error) return policyErrorResponse(res, bl.error);
+      data.dailyBookingLimit = bl.value;
+    } else {
+      data.dailyBookingLimit = null;
+    }
     const pickup = parsePickupAddress(body);
     if (pickup.error) return pickupErrorResponse(res, pickup.error);
     const pickupEmailErr = pickupEmailError(pickup.address);
@@ -1033,9 +1065,20 @@ const updateProduct = async (req, res) => {
     if (body.fastestDelivery !== undefined) {
       updateData.fastestDelivery = toBool(body.fastestDelivery);
     }
-    const finalType =
+        const finalType =
       updateData.productType || existingProduct.productType || "PRODUCT";
     if (finalType === "SERVICE") updateData.fastestDelivery = false;
+
+    // [BOOKING LIMIT] SERVICE hole limit update, PRODUCT hole muche dao
+    if (finalType === "SERVICE") {
+      if (body.dailyBookingLimit !== undefined) {
+        const bl = parseBookingLimit(body.dailyBookingLimit);
+        if (bl.error) return policyErrorResponse(res, bl.error);
+        updateData.dailyBookingLimit = bl.value;
+      }
+    } else {
+      updateData.dailyBookingLimit = null;
+    }
 
     // [STOCK] hasStockManagement snapshot create er por kokhono change hobe na
     delete updateData.hasStockManagement;
@@ -1967,6 +2010,77 @@ const getStoreSingleProduct = async (req, res) => {
   }
 };
 
+const getBookingAvailability = async (req, res) => {
+  try {
+    const { storeUniqueId, productId } = req.params;
+
+    if (!mongoose.isValidObjectId(productId)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+
+    const store = await getPublicStore(storeUniqueId);
+    if (!store) return sendStoreUnavailable(res);
+
+    const product = await ProductModel.findOne({
+      _id: productId,
+      storeId: store._id,
+      isActive: true,
+      isVerified: true,
+      productType: "SERVICE",
+    })
+      .select("name dailyBookingLimit")
+      .lean();
+
+    if (!product) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Service not found" });
+    }
+
+    const limit = product.dailyBookingLimit;
+    if (!limit) {
+      return res
+        .status(200)
+        .json({ success: true, limited: false, dailyBookingLimit: null, days: [] });
+    }
+
+    const todayIST = new Date(Date.now() + 5.5 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const fromQ = String(req.query.from || "");
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && fromQ >= todayIST ? fromQ : todayIST;
+    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 60);
+
+    const dates = Array.from({ length: days }, (_, i) => ymdAddDays(from, i));
+
+    const slots = await BookingSlotModel.find({
+      productId: product._id,
+      date: { $in: dates },
+    })
+      .select("date count")
+      .lean();
+    const countMap = new Map(slots.map((s) => [s.date, s.count]));
+
+    return res.status(200).json({
+      success: true,
+      limited: true,
+      dailyBookingLimit: limit,
+      days: dates.map((date) => {
+        const booked = countMap.get(date) || 0;
+        const remaining = Math.max(0, limit - booked);
+        return { date, booked, remaining, full: remaining === 0 };
+      }),
+    });
+  } catch (error) {
+    console.error("Get Booking Availability Error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
 module.exports = {
   createProduct,
   getAllProducts,
@@ -1980,4 +2094,5 @@ module.exports = {
   getStoreProductsByCategory,
   getStoreSingleProduct,
   getProductPickupAddress,
+  getBookingAvailability
 };

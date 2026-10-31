@@ -343,6 +343,10 @@ const orderSchema = new mongoose.Schema(
     note: { type: String, default: null },
     bookingDate: { type: Date, default: null },
     hasService: { type: Boolean, default: false },
+    bookingSlotProductIds: {
+      type: [mongoose.Schema.Types.ObjectId],
+      default: [],
+    },
     refundedAmount: { type: Number, default: 0, min: 0 },
     expectedDeliveryDate: { type: Date, default: null },
     deliveryInfo: { type: deliveryInfoSchema, default: null },

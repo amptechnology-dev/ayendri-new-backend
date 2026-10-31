@@ -70,7 +70,7 @@ const {
 const { OrderRequestModel } = require("../model/orderRequest.model.js");
 const { checkCancelRefund } = require("../helper/orderRefund.js");
 const { snapshotPolicy } = require("../helper/productPolicy.js");
-
+const BookingSlotModel = require("../model/bookingSlot.model.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -196,6 +196,80 @@ const rollbackLines = (lines) =>
       }),
     ),
   );
+
+// ===================== [BOOKING LIMIT] =====================
+const dateKey = (d) => new Date(d).toISOString().slice(0, 10);
+
+// reserve kora slot gulo ferot dao (cancel / fail hole)
+const releaseBookingSlots = async (productIds, ymd) => {
+  if (!Array.isArray(productIds) || productIds.length === 0 || !ymd) return;
+  await Promise.all(
+    productIds.map((productId) =>
+      BookingSlotModel.updateOne(
+        { productId, date: ymd, count: { $gt: 0 } },
+        { $inc: { count: -1 } },
+      ),
+    ),
+  );
+};
+
+// SERVICE product er dailyBookingLimit onujayi slot reserve kore. Atomic:
+// filter e count < limit, na hole upsert insert korte jay -> unique index e 11000 = full
+const reserveBookingSlots = async ({ products, bookingDate }) => {
+  const limited = [
+    ...new Map(
+      products
+        .filter((p) => p.productType === "SERVICE" && p.dailyBookingLimit > 0)
+        .map((p) => [String(p._id), p]),
+    ).values(),
+  ];
+  if (limited.length === 0) return { ok: true, reserved: [] };
+
+  if (!bookingDate) {
+    return {
+      ok: false,
+      code: "BOOKING_DATE_REQUIRED",
+      message: "Please select a booking date for this service",
+    };
+  }
+
+  const reserved = [];
+  for (const p of limited) {
+    let done = false;
+    // prothom booking e 2 ta request ek sathe upsert korle ekta spurious 11000 pete pare, tai 1 bar retry
+    for (let attempt = 0; attempt < 2 && !done; attempt++) {
+      try {
+        await BookingSlotModel.findOneAndUpdate(
+          {
+            productId: p._id,
+            date: bookingDate,
+            count: { $lt: p.dailyBookingLimit },
+          },
+          { $inc: { count: 1 } },
+          { upsert: true, new: true },
+        );
+        done = true;
+      } catch (err) {
+        if (err?.code !== 11000) {
+          await releaseBookingSlots(reserved, bookingDate);
+          throw err;
+        }
+      }
+    }
+
+    if (!done) {
+      await releaseBookingSlots(reserved, bookingDate);
+      return {
+        ok: false,
+        code: "BOOKING_FULL",
+        message: `Booking is full for "${p.name}" on ${bookingDate}. Please choose another date`,
+      };
+    }
+    reserved.push(p._id);
+  }
+
+  return { ok: true, reserved };
+};
 
 // [PICKUP] customer ke pathanor age store er pickup address muche dao
 const publicOrder = (o) => {
@@ -501,6 +575,25 @@ const attemptStoreCheckout = async ({
     return { success: false, storeId, code: "OUT_OF_STOCK", outOfStockLines };
   }
 
+  // [BOOKING LIMIT] stock thik thakle booking slot reserve (preview te reserve hoy na)
+  let reservedBookingProductIds = [];
+  if (hasService && !dryRun) {
+    const slot = await reserveBookingSlots({
+      products: lineProducts,
+      bookingDate,
+    });
+    if (!slot.ok) {
+      await rollbackLines(decrementedLines);
+      return {
+        success: false,
+        storeId,
+        code: slot.code,
+        message: slot.message,
+      };
+    }
+    reservedBookingProductIds = slot.reserved;
+  }
+
   // [GST] proti item e GST calculate, tarpor totals
   const gstItems = orderItems.map((i) => applyGstToItem(i, gstMode));
 
@@ -605,6 +698,7 @@ const attemptStoreCheckout = async ({
       pickupAddress,
       note,
       hasService,
+      bookingSlotProductIds: reservedBookingProductIds,
       bookingDate:
         hasService && bookingDate ? toDeliveryDate(bookingDate) : null,
       paymentMethod: effectiveMethod,
@@ -616,6 +710,10 @@ const attemptStoreCheckout = async ({
     });
   } catch (err) {
     await rollbackLines(decrementedLines);
+    await releaseBookingSlots(
+      reservedBookingProductIds,
+      hasService && bookingDate ? bookingDate : null,
+    );
     throw err;
   }
 
@@ -642,16 +740,20 @@ const attemptStoreCheckout = async ({
   return { success: true, storeId, order };
 };
 
-// ===================== INTERNAL: restore stock for every item of an order =====================
-// [PAYMENT] payment.controller (expire cron) o eta use kore, tai export kora ache
 const restoreOrderStock = async (order, userId) => {
+  // [BOOKING LIMIT] cancel hole service booking slot ferot
+  if (order.bookingSlotProductIds?.length && order.bookingDate) {
+    await releaseBookingSlots(
+      order.bookingSlotProductIds,
+      dateKey(order.bookingDate),
+    );
+  }
+
   await Promise.all(
     order.items.map(async (item) => {
-      // [FIX] simple product er jonno currentStock / lowStockThreshold o select kora hoyeche
       const product = await ProductModel.findById(item.productId).select(
         "variants currentStock lowStockThreshold hasStockManagement",
       );
-      // [STOCK] product nei ba stock managed na hole restore korar kichu nei
       if (!product || !isStockManaged(product)) return;
 
       const unit = locateStockUnit(product, cleanVariantId(item.variantId));
@@ -1934,7 +2036,7 @@ const ymdAfterMinutesIST = (minutes) =>
 // order er jonno Shiprocket theke courier ene maxDays + mode diye filter
 const buildShippingOptions = async (order, { maxDays, mode }) => {
   const cfg = await getStoreDeliveryCfg(order.storeId);
-  const pickupPostcode = order.pickupAddress?.pincode || cfg?.pincode; 
+  const pickupPostcode = order.pickupAddress?.pincode || cfg?.pincode;
   if (!pickupPostcode) {
     return {
       ok: false,
@@ -2216,5 +2318,5 @@ module.exports = {
   checkoutPreview,
   getShippingOptions,
   selectShippingOption,
-  notifyPickupContact, 
+  notifyPickupContact,
 };

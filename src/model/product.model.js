@@ -180,6 +180,7 @@ const productSchema = new mongoose.Schema(
       default: "PRODUCT",
       index: true,
     },
+    dailyBookingLimit: { type: Number, default: null, min: 1 },
     fastestDelivery: { type: Boolean, default: false },
     pickupAddress: { type: pickupAddressSchema, default: undefined },
     isReturnable: { type: Boolean, default: false },
