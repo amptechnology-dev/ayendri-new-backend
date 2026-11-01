@@ -175,7 +175,8 @@ const deliveryInfoSchema = new mongoose.Schema(
       enum: ["AUTO", "STORE"],
       default: "AUTO",
     },
-
+    fastestDelivery: { type: Boolean, default: false }, // customer chose fastest at order time
+    fastestFeeApplied: { type: Boolean, default: false }, // fixed fastest fee charged instead of courier rate
     chargeableWeightKg: { type: Number, default: null },
     shippingCharge: { type: Number, default: 0 }, // customer ke je charge
     baseShippingCharge: { type: Number, default: null }, // order value rule er age

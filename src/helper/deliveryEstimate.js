@@ -376,10 +376,26 @@ const freeThresholds = (delivery) => {
   return { PRODUCT: min("PRODUCT"), SERVICE: min("SERVICE") };
 };
 
-const finalizeShipping = (delivery, totals, productType = "PRODUCT") => {
+// store's fixed fee for fastest delivery (null = not configured)
+const fastestChargesOf = (cfg) => ({
+  PRODUCT: Number.isFinite(cfg.fastestChargeProduct)
+    ? cfg.fastestChargeProduct
+    : null,
+  SERVICE: Number.isFinite(cfg.fastestChargeService)
+    ? cfg.fastestChargeService
+    : null,
+});
+
+const finalizeShipping = (
+  delivery,
+  totals,
+  productType = "PRODUCT",
+  opts = {},
+) => {
   const info = delivery?.info;
   if (!info) return null;
 
+  const fastest = opts?.fastest === true;
   const base = info.shippingCharge;
   if (info.mode === "INTERNATIONAL") {
     return { ...info, baseShippingCharge: base };
@@ -406,7 +422,36 @@ const finalizeShipping = (delivery, totals, productType = "PRODUCT") => {
 
   if (evals.length === 0) return { ...info, baseShippingCharge: base };
 
+  // highest charge among the types in the cart
   const worst = evals.reduce((a, b) => (b.charge > a.charge ? b : a));
+
+  // delivery is free by rules only when EVERY type in the cart met its own rule
+  const freeByRules = evals.every((e) => !!e.rule) && worst.charge === 0;
+
+  // customer chose fastest AND delivery would be free -> fixed fastest fee per type
+  if (fastest && freeByRules && info.mode === "NATIONAL") {
+    const fees = evals.map((e) => delivery.fastestCharges?.[e.type]);
+    const configured = fees.every(
+      (f) => f !== null && f !== undefined && Number.isFinite(Number(f)),
+    );
+
+    if (configured) {
+      const fee = round2(fees.reduce((sum, f) => sum + Number(f), 0));
+      return {
+        ...info,
+        baseShippingCharge: base, // fastest courier rate
+        shippingCharge: fee,
+        fastestFeeApplied: true,
+        appliedRuleType: worst.type,
+        shippingNote: `Fastest delivery fee ₹${fee}`,
+      };
+    }
+
+    // fee not configured: customer pays the fastest courier rate
+    return { ...info, baseShippingCharge: base };
+  }
+
+  // some type did not meet its rule -> normal charge applies
   if (!worst.rule) return { ...info, baseShippingCharge: base };
 
   return {
@@ -452,6 +497,8 @@ const checkStoreDelivery = async ({
 
   if (!cfg) return { deliverable: true, configured: false, info: null };
 
+  const fastestCharges = fastestChargesOf(cfg);
+
   const pickupPin = isValidPincode(pickupPincode)
     ? String(pickupPincode).trim()
     : cfg.pincode;
@@ -489,7 +536,7 @@ const checkStoreDelivery = async ({
       weightKg: weight,
       parcel,
       fastest,
-      pickupPostcode: pickupPin, // [FIX]
+      pickupPostcode: pickupPin,
     });
     return {
       deliverable: true,
@@ -497,6 +544,7 @@ const checkStoreDelivery = async ({
       info,
       chargeRules: [],
       chargeRulesByType: { PRODUCT: [], SERVICE: [] },
+      fastestCharges, // not used for international (always courier rate)
     };
   }
 
@@ -532,6 +580,7 @@ const checkStoreDelivery = async ({
         info: resolveLocal({ cfg, distanceKm, handlingMin, pin }),
         chargeRules,
         chargeRulesByType,
+        fastestCharges,
       };
     }
   }
@@ -546,7 +595,7 @@ const checkStoreDelivery = async ({
       parcel,
       cod,
       fastest,
-      pickupPostcode: pickupPin, // [FIX]
+      pickupPostcode: pickupPin,
     });
 
     if (!national.serviceable) {
@@ -560,6 +609,7 @@ const checkStoreDelivery = async ({
       info: national.info,
       chargeRules,
       chargeRulesByType,
+      fastestCharges,
     };
   }
 

@@ -177,6 +177,22 @@ const saveDeliverySettings = async (req, res) => {
       isActive: true,
     };
 
+    // [FASTEST FEE] only meaningful when courier delivery is ON. undefined = field not sent, keep old value
+    if (data.fastestChargeProduct !== undefined) {
+      update.fastestChargeProduct = needsNational
+        ? round2(data.fastestChargeProduct)
+        : null;
+    }
+    if (data.fastestChargeService !== undefined) {
+      update.fastestChargeService = needsNational
+        ? round2(data.fastestChargeService)
+        : null;
+    }
+    if (!needsNational) {
+      update.fastestChargeProduct = null;
+      update.fastestChargeService = null;
+    }
+
     if (needsNational) {
       update.nationalMinDays = data.nationalMinDays;
       update.nationalMaxDays = data.nationalMaxDays;
@@ -299,6 +315,10 @@ const checkDelivery = async (req, res) => {
     const cod = ["1", "true"].includes(
       String(req.query.cod || "").toLowerCase(),
     );
+    // [FASTEST] customer wants the fastest courier
+    const fastest = ["1", "true"].includes(
+      String(req.query.fastest || "").toLowerCase(),
+    );
 
     let itemsTotal = null;
     if (req.query.itemsTotal !== undefined && req.query.itemsTotal !== "") {
@@ -381,12 +401,13 @@ const checkDelivery = async (req, res) => {
       parcel,
       cod,
       policy,
+      fastest,
       pickupPincode,
     });
 
     const info =
       result.deliverable && itemsTotal !== null
-        ? finalizeShipping(result, itemsTotal, productType)
+        ? finalizeShipping(result, itemsTotal, productType, { fastest })
         : result.info;
 
     const thresholds = result.deliverable ? freeThresholds(result) : null;
@@ -397,6 +418,14 @@ const checkDelivery = async (req, res) => {
       configured: result.configured,
       message: result.message || null,
       productType,
+      fastest,
+      // fastest option makes sense only when a courier is involved
+      fastestAvailable: !!(
+        result.deliverable &&
+        result.info &&
+        result.info.mode !== "LOCAL"
+      ),
+      fastestCharges: result.fastestCharges || null,
       delivery: info,
       isFree: info ? (info.shippingCharge ?? 0) === 0 : false,
       freeDeliveryAbove: thresholds ? thresholds[productType] : null,

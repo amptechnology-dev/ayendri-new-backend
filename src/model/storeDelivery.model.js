@@ -67,8 +67,8 @@ const storeDeliverySchema = new mongoose.Schema(
     productChargeRules: { type: [chargeRuleSchema], default: [] },
     // [NEW] SERVICE order er jonno alada rule
     serviceChargeRules: { type: [chargeRuleSchema], default: [] },
-    // purono field. Notun save e khali kora hoy. Notun rule na thakle
-    // purono store e eta-i duto type er jonno fallback hishebe kaj kore
+    fastestChargeProduct: { type: Number, default: null, min: 0 },
+    fastestChargeService: { type: Number, default: null, min: 0 },
     chargeRules: { type: [chargeRuleSchema], default: [] },
 
     // order pack / dispatch korte lagbe koto somoy (shob delivery te jog hoy)

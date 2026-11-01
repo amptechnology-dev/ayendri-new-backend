@@ -288,6 +288,34 @@ const notifyPickupContact = (order, { force = false } = {}) => {
   );
 };
 
+// [CART] inactive / unverified / deleted product gulo alada kora
+const splitLiveItems = async (items) => {
+  if (!items.length) return { live: [], dead: [] };
+  const ids = [...new Set(items.map((i) => String(i.productId)))];
+  const docs = await ProductModel.find({
+    _id: { $in: ids },
+    isActive: true,
+    isVerified: true,
+  })
+    .select("_id")
+    .lean();
+  const liveSet = new Set(docs.map((d) => String(d._id)));
+  const live = [];
+  const dead = [];
+  for (const i of items) {
+    (liveSet.has(String(i.productId)) ? live : dead).push(i);
+  }
+  return { live, dead };
+};
+
+const toUnavailableItems = (dead) =>
+  dead.map((i) => ({
+    itemId: i._id,
+    productId: i.productId,
+    variantId: i.variantId ?? null,
+    reason: "PRODUCT_UNAVAILABLE",
+  }));
+
 const groupLinesForCheckout = async (items) => {
   const ids = [...new Set(items.map((i) => String(i.productId)))];
   const docs = await ProductModel.find({ _id: { $in: ids } })
@@ -339,6 +367,7 @@ const attemptStoreCheckout = async ({
   note,
   bookingDate, // [BOOKING] "YYYY-MM-DD" (dryRun e lagbe na)
   paymentMethod,
+  fastestDelivery = false, // [FASTEST] customer's choice at order time
   dryRun = false,
 }) => {
   const store = await StoreModel.findOne({
@@ -409,18 +438,23 @@ const attemptStoreCheckout = async ({
   const paymentOff = payment.paymentOff;
 
   const parcel = linesParcel(lines, productMap);
-  const wantsFastest = lines.some(
-    (l) => productMap.get(String(l.productId))?.fastestDelivery === true,
-  );
-  const delivery = await checkStoreDelivery({
+
+  // [FASTEST] only the customer's choice at order time decides. Product flag is display only now
+  const wantsFastest = fastestDelivery === true;
+
+  const deliveryArgs = {
     storeId,
     pincode: deliveryAddress?.pincode,
     country: deliveryAddress?.country,
     parcel,
     cod: effectiveMethod === "COD" && !paymentOff,
     policy,
-    fastest: wantsFastest,
     pickupPincode: shippingPickupPincode, // [CHANGE]
+  };
+
+  const delivery = await checkStoreDelivery({
+    ...deliveryArgs,
+    fastest: wantsFastest,
   });
   if (!delivery.deliverable) {
     return {
@@ -632,12 +666,50 @@ const attemptStoreCheckout = async ({
     );
   }
 
-  const shippingInfo = finalizeShipping(delivery, totalsByType); // delivery off hole null
+  // [FASTEST] free by rules + fastest ON -> fixed fastest fee, otherwise normal / fastest courier rate
+  const shippingInfo = finalizeShipping(delivery, totalsByType, "PRODUCT", {
+    fastest: wantsFastest,
+  }); // delivery off hole null
   const shippingCharge = round2(shippingInfo?.shippingCharge || 0);
   const grandTotal = round2(itemsTotal + shippingCharge);
 
   // ---------- preview: order create / stock minus na kore hishab ferot ----------
   if (dryRun) {
+    // [FASTEST] show both prices so the app can render the fastest toggle
+    let fastestOption = { available: false };
+    if (shippingInfo && delivery.info?.mode !== "LOCAL") {
+      const otherDelivery = await checkStoreDelivery({
+        ...deliveryArgs,
+        fastest: !wantsFastest,
+      });
+
+      if (otherDelivery.deliverable && otherDelivery.info) {
+        const normalDelivery = wantsFastest ? otherDelivery : delivery;
+        const fastDelivery = wantsFastest ? delivery : otherDelivery;
+
+        const summarize = (d, fast) => {
+          const s = finalizeShipping(d, totalsByType, "PRODUCT", { fastest: fast });
+          if (!s) return null;
+          return {
+            shippingCharge: round2(s.shippingCharge || 0),
+            etaLabel: s.etaLabel || null,
+            minDays: s.minDays ?? null,
+            maxDays: s.maxDays ?? null,
+            estimatedMaxDate: s.estimatedMaxDate || null,
+            courierName: s.courierName || null,
+            fixedFeeApplied: s.fastestFeeApplied === true,
+          };
+        };
+
+        fastestOption = {
+          available: true,
+          selected: wantsFastest,
+          normal: summarize(normalDelivery, false),
+          fastest: summarize(fastDelivery, true),
+        };
+      }
+    }
+
     return {
       success: true,
       dryRun: true,
@@ -656,6 +728,8 @@ const attemptStoreCheckout = async ({
         paymentMethod: effectiveMethod,
         paymentOff,
         priceStatus,
+        fastestDelivery: wantsFastest,
+        fastestOption,
       },
     };
   }
@@ -804,6 +878,7 @@ const checkout = async (req, res) => {
       note,
       bookingDate,
       paymentMethod,
+      fastestDelivery,
     } = cartCheckoutSchema.parse(req.body);
 
     const cart = await CartModel.findOne({ _id: cartId, userId });
@@ -819,10 +894,25 @@ const checkout = async (req, res) => {
       items = items.filter((i) => storeIdSet.has(String(i.storeId)));
     }
 
+    // [CART] unavailable product bad dao ar cart theke muche dao
+    const { live, dead } = await splitLiveItems(items);
+    const unavailableItems = toUnavailableItems(dead);
+    if (dead.length > 0) {
+      await CartModel.updateOne(
+        { _id: cartId, userId },
+        { $pull: { items: { _id: { $in: dead.map((i) => i._id) } } } },
+      );
+    }
+    items = live;
+
     if (items.length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "No items to checkout" });
+      return res.status(400).json({
+        success: false,
+        message: dead.length
+          ? "All items in your cart are unavailable"
+          : "No items to checkout",
+        unavailableItems: dead.length ? unavailableItems : undefined,
+      });
     }
 
     // [PICKUP] store + pickup address wise group
@@ -842,6 +932,7 @@ const checkout = async (req, res) => {
           note,
           bookingDate,
           paymentMethod,
+          fastestDelivery, // [FASTEST]
         });
 
         if (result.success) {
@@ -876,6 +967,7 @@ const checkout = async (req, res) => {
         success: false,
         message: "Checkout failed for all stores",
         failedStores,
+        unavailableItems: dead.length ? unavailableItems : undefined,
       });
     }
 
@@ -893,6 +985,7 @@ const checkout = async (req, res) => {
           : "Order(s) placed successfully",
       orders: createdOrders.map(publicOrder), // [PICKUP]
       failedStores: failedStores.length > 0 ? failedStores : undefined,
+      unavailableItems: dead.length ? unavailableItems : undefined,
     });
   } catch (error) {
     return handleError(res, error, "Checkout Error");
@@ -910,6 +1003,7 @@ const buyNow = async (req, res) => {
       note,
       bookingDate,
       paymentMethod,
+      fastestDelivery,
     } = directCheckoutSchema.parse(req.body);
 
     const product = await ProductModel.findOne({
@@ -931,6 +1025,7 @@ const buyNow = async (req, res) => {
       note,
       bookingDate, // [BOOKING]
       paymentMethod,
+      fastestDelivery, // [FASTEST]
     });
 
     if (!result.success) {
@@ -1844,6 +1939,7 @@ const previewStore = async ({
   lines,
   deliveryAddress,
   paymentMethod,
+  fastestDelivery = false,
 }) => {
   const [store, policy] = await Promise.all([
     StoreModel.findById(storeId).select("storeName storeUniqueId").lean(),
@@ -1867,6 +1963,7 @@ const previewStore = async ({
     deliveryAddress,
     note: null,
     paymentMethod,
+    fastestDelivery,
     dryRun: true,
   });
 
@@ -1881,6 +1978,7 @@ const previewStore = async ({
       shippingCharge: 0,
       grandTotal: 0,
       delivery: null,
+      fastestOption: { available: false },
     };
   }
 
@@ -1896,6 +1994,8 @@ const previewStore = async ({
     shippingCharge: p.shippingCharge,
     grandTotal: p.grandTotal,
     delivery: p.delivery,
+    fastestDelivery: p.fastestDelivery,
+    fastestOption: p.fastestOption,
   };
 };
 
@@ -1904,6 +2004,8 @@ const checkoutPreview = async (req, res) => {
     const userId = getUserId(req);
     const { cartId, storeIds, productId, variantId, quantity } = req.body || {};
     const paymentMethod = req.body?.paymentMethod === "COD" ? "COD" : "ONLINE";
+    // [FASTEST] customer's toggle
+    const fastestDelivery = toBool(req.body?.fastestDelivery);
 
     const addr = req.body?.deliveryAddress || {};
     const deliveryAddress = {
@@ -1914,6 +2016,7 @@ const checkoutPreview = async (req, res) => {
     };
 
     let groupList = [];
+    let unavailableItems = []; // [CART]
 
     if (cartId) {
       if (!mongoose.isValidObjectId(cartId)) {
@@ -1933,7 +2036,11 @@ const checkoutPreview = async (req, res) => {
         const set = new Set(storeIds.map(String));
         items = items.filter((i) => set.has(String(i.storeId)));
       }
-      groupList = await groupLinesForCheckout(items); // [PICKUP]
+
+      // [CART] unavailable product bad diye hishab, alada kore janao
+      const { live, dead } = await splitLiveItems(items);
+      unavailableItems = toUnavailableItems(dead);
+      groupList = await groupLinesForCheckout(live); // [PICKUP]
     } else if (productId) {
       if (!mongoose.isValidObjectId(productId)) {
         return res
@@ -1972,9 +2079,15 @@ const checkoutPreview = async (req, res) => {
     }
 
     if (groupList.length === 0) {
-      return res
-        .status(400)
-        .json({ success: false, message: "No items to checkout" });
+      return res.status(400).json({
+        success: false,
+        message: unavailableItems.length
+          ? "All items in your cart are unavailable"
+          : "No items to checkout",
+        unavailableItems: unavailableItems.length
+          ? unavailableItems
+          : undefined,
+      });
     }
 
     const stores = [];
@@ -1986,6 +2099,7 @@ const checkoutPreview = async (req, res) => {
           lines: g.lines,
           deliveryAddress,
           paymentMethod,
+          fastestDelivery,
         }),
       );
     }
@@ -1997,12 +2111,16 @@ const checkoutPreview = async (req, res) => {
     return res.status(200).json({
       success: true,
       paymentMethod,
+      fastestDelivery,
+      // show the fastest toggle if at least one store can use a courier
+      fastestAvailable: okStores.some((s) => s.fastestOption?.available),
       itemsTotal: sum("itemsTotal"),
       totalShipping: sum("shippingCharge"),
       grandTotal: sum("grandTotal"),
       codAvailable: stores.every((s) => s.codAvailable),
       paymentRequired: stores.some((s) => s.onlineAvailable),
-      stores, // alada pickup hole ekই store ekadhik bar thakte pare
+      unavailableItems, // [CART] empty array hole kono dead item nei
+      stores, // alada pickup hole ekoi store ekadhik bar thakte pare
     });
   } catch (error) {
     return handleError(res, error, "Checkout Preview Error");

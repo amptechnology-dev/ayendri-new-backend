@@ -55,6 +55,11 @@ const deliveryAddressInputSchema = z.object({
   country: z.string().trim().optional(),
 });
 
+const fastestFlag = z.preprocess((v) => {
+  if (v === undefined || v === null || v === "") return false;
+  return typeof v === "boolean" ? v : String(v).trim().toLowerCase() === "true";
+}, z.boolean());
+
 // ---- Cart theke checkout (multiple store, multiple item) ----
 const cartCheckoutSchema = z.object({
   cartId: objectIdSchema,
@@ -63,6 +68,7 @@ const cartCheckoutSchema = z.object({
   note: z.string().trim().optional(),
   bookingDate: optionalBookingDate, // [BOOKING] optional
   paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
+  fastestDelivery: fastestFlag,
 });
 
 // ---- Product theke direct "Buy Now" (cart chara, ekta product + optional variant) ----
@@ -78,6 +84,7 @@ const directCheckoutSchema = z.object({
   note: z.string().trim().optional(),
   bookingDate: optionalBookingDate, // [BOOKING] optional
   paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
+  fastestDelivery: fastestFlag,
 });
 
 const REQUEST_TYPES = ["RETURN", "REPLACE", "REFUND"];

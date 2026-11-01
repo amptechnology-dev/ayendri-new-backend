@@ -19,6 +19,11 @@ const ruleSchema = z.object({
   charge: z.coerce.number().min(0).max(100000),
 });
 
+const optionalFee = z.preprocess(
+  (v) => (v === "" ? null : v),
+  z.coerce.number().min(0).max(100000).nullable().optional(),
+);
+
 const saveDeliverySettingsSchema = z
   .object({
     storeId: z.string().min(1, "Store is required"),
@@ -36,7 +41,8 @@ const saveDeliverySettingsSchema = z
     // [NEW] product / service alada rule
     productChargeRules: z.array(ruleSchema).max(20).optional(),
     serviceChargeRules: z.array(ruleSchema).max(20).optional(),
-    // purono field (purono frontend / API call er jonno), notun frontend pathabe na
+    fastestChargeProduct: optionalFee,
+    fastestChargeService: optionalFee,
     chargeRules: z.array(ruleSchema).max(20).optional(),
 
     // NATIONAL
