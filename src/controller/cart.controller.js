@@ -24,6 +24,7 @@ const { AVAILABLE_STORE_FILTER } = require("../helper/storeAvailability.js");
 const { hasPrice } = require("../helper/priceQuote.js");
 // [GST]
 const { getGstMode, calcLineGst } = require("../helper/gst.js");
+const BookingSlotModel = require("../model/bookingSlot.model.js");
 
 // ===================== HELPERS =====================
 
@@ -36,6 +37,44 @@ const getDeliveryState = (req) =>
   typeof req.query?.state === "string" && req.query.state.trim()
     ? req.query.state.trim()
     : null;
+
+// ===================== [BOOKING] =====================
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const todayIST = () =>
+  new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
+
+// faka -> { value: null }, thik hole { value: "YYYY-MM-DD" }, noile { error }
+const parseBookingDate = (raw) => {
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return { value: null };
+  }
+  const s = String(raw).trim();
+  const valid =
+    /^\d{4}-\d{2}-\d{2}$/.test(s) &&
+    !Number.isNaN(Date.parse(`${s}T00:00:00.000Z`)) &&
+    new Date(`${s}T00:00:00.000Z`).toISOString().slice(0, 10) === s;
+  if (!valid) return { error: "Invalid booking date" };
+  if (s <= todayIST()) {
+    return {
+      error: "Same-day booking isn't available. Please pick a later date",
+    };
+  }
+  return { value: s };
+};
+
+// daily limit e oi date full kina (cart e reserve hoy na, shudhu check)
+const isBookingFull = async (product, ymd) => {
+  if (!product.dailyBookingLimit || !ymd) return false;
+  const slot = await BookingSlotModel.findOne({
+    productId: product._id,
+    date: ymd,
+  })
+    .select("count")
+    .lean();
+  return (slot?.count || 0) >= product.dailyBookingLimit;
+};
+
+const isServiceProduct = (p) => p?.productType === "SERVICE";
 
 const handleError = (res, error, label) => {
   if (error.name === "ZodError") {
@@ -134,7 +173,7 @@ const serializeCart = async (
       // [TIER] priceTiers select e add
       // [GST] gst + gstInclusive (variants er bhetore nested gst automatic ashe)
       .select(
-        "name productCode images unit variants priceTiers mrp offerPrice currentStock hasStockManagement isActive isVerified gst gstInclusive",
+        "name productCode images unit variants priceTiers mrp offerPrice currentStock hasStockManagement isActive isVerified gst gstInclusive productType",
       )
       .lean(),
     StoreModel.find({ _id: { $in: storeIds } })
@@ -186,10 +225,10 @@ const serializeCart = async (
     const inStock = !trackStock || Boolean(liveSource && liveSource.stock > 0);
     const isAvailable = Boolean(
       liveProduct?.isActive &&
-        liveProduct?.isVerified &&
-        liveSource &&
-        storeAvailable &&
-        inStock,
+      liveProduct?.isVerified &&
+      liveSource &&
+      storeAvailable &&
+      inStock,
     );
 
     // [STOCK] quantity cap shudhu stock managed product e
@@ -277,6 +316,11 @@ const serializeCart = async (
       stock: !trackStock ? null : isAvailable ? liveSource.stock : 0,
       stockManaged: trackStock,
       quantityExceedsStock: exceedsStock,
+      productType: liveProduct?.productType ?? "PRODUCT",
+      bookingDate: item.bookingDate ?? null,
+      bookingDateExpired:
+        isServiceProduct(liveProduct) &&
+        (!item.bookingDate || item.bookingDate <= todayIST()),
     });
   }
 
@@ -321,6 +365,38 @@ const addToCart = async (req, res) => {
       });
     }
 
+    // [BOOKING] SERVICE hole date must, PRODUCT hole date ignore
+    let bookingDate = null;
+    if (isServiceProduct(product)) {
+      const bd = parseBookingDate(req.body?.bookingDate);
+      if (bd.error) {
+        return res.status(400).json({
+          success: false,
+          message: bd.error,
+          errors: [{ field: "bookingDate", message: bd.error }],
+        });
+      }
+      if (!bd.value) {
+        return res.status(400).json({
+          success: false,
+          message: "Please select a booking date for this service",
+          errors: [
+            {
+              field: "bookingDate",
+              message: "Please select a booking date for this service",
+            },
+          ],
+        });
+      }
+      if (await isBookingFull(product, bd.value)) {
+        return res.status(409).json({
+          success: false,
+          message: `Booking is full for "${product.name}" on ${bd.value}. Please choose another date`,
+        });
+      }
+      bookingDate = bd.value;
+    }
+
     // [STOCK] stock check shudhu stock managed product e (cart e reserve hoy na)
     const trackStock = isStockManaged(product);
 
@@ -349,11 +425,12 @@ const addToCart = async (req, res) => {
       { upsert: true, new: true },
     );
 
-    // same product + SAME variant (ba duitai simple hole) -> ek line
+    // same product + SAME variant + SAME booking date -> ek line
     const existing = cart.items.find(
       (i) =>
         String(i.productId) === String(product._id) &&
-        String(i.variantId ?? "") === String(source.variantId ?? ""),
+        String(i.variantId ?? "") === String(source.variantId ?? "") &&
+        String(i.bookingDate ?? "") === String(bookingDate ?? ""),
     );
 
     const newQuantity = (existing?.quantity ?? 0) + quantity;
@@ -399,6 +476,7 @@ const addToCart = async (req, res) => {
         storeId: product.storeId,
         storeName: store.storeName,
         quantity,
+        bookingDate, // [BOOKING]
         ...snapshot,
       });
     }
@@ -429,7 +507,6 @@ const getCart = async (req, res) => {
   }
 };
 
-// ===================== 3. UPDATE ITEM QUANTITY =====================
 const updateCartItem = async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -467,6 +544,58 @@ const updateCartItem = async (req, res) => {
       });
     }
 
+    // [BOOKING] service e date change / set kora
+    let nextBookingDate = item.bookingDate ?? null;
+    if (isServiceProduct(product)) {
+      if (req.body?.bookingDate !== undefined) {
+        const bd = parseBookingDate(req.body.bookingDate);
+        if (bd.error || !bd.value) {
+          return res.status(400).json({
+            success: false,
+            message: bd.error || "Please select a booking date for this service",
+            errors: [
+              {
+                field: "bookingDate",
+                message:
+                  bd.error || "Please select a booking date for this service",
+              },
+            ],
+          });
+        }
+        nextBookingDate = bd.value;
+      }
+
+      if (!nextBookingDate) {
+        return res.status(400).json({
+          success: false,
+          message: "Please select a booking date for this service",
+        });
+      }
+
+      if (nextBookingDate !== (item.bookingDate ?? null)) {
+        // oi date e same product + variant already cart e thakle duplicate line hobe
+        const dup = cart.items.find(
+          (i) =>
+            String(i._id) !== String(item._id) &&
+            String(i.productId) === String(item.productId) &&
+            String(i.variantId ?? "") === String(item.variantId ?? "") &&
+            String(i.bookingDate ?? "") === nextBookingDate,
+        );
+        if (dup) {
+          return res.status(409).json({
+            success: false,
+            message: `This service is already in your cart for ${nextBookingDate}`,
+          });
+        }
+        if (await isBookingFull(product, nextBookingDate)) {
+          return res.status(409).json({
+            success: false,
+            message: `Booking is full for "${product.name}" on ${nextBookingDate}. Please choose another date`,
+          });
+        }
+      }
+    }
+
     // [STOCK] stock check shudhu stock managed product e
     if (isStockManaged(product) && quantity > source.stock) {
       return res.status(400).json({
@@ -479,7 +608,11 @@ const updateCartItem = async (req, res) => {
     }
 
     // [TIER] notun quantity onujayi price
-    item.set({ ...toSnapshot(product, source, quantity), quantity });
+    item.set({
+      ...toSnapshot(product, source, quantity),
+      quantity,
+      bookingDate: isServiceProduct(product) ? nextBookingDate : null,
+    });
     await cart.save();
 
     return res.status(200).json({

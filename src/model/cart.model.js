@@ -28,6 +28,8 @@ const cartItemSchema = new mongoose.Schema(
       },
     },
 
+    bookingDate: { type: String, default: null },
+
     color: { type: String, default: null, trim: true },
     size: { type: String, default: null, trim: true },
     weight: { type: String, default: null, trim: true },

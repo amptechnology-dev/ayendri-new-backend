@@ -288,25 +288,58 @@ const notifyPickupContact = (order, { force = false } = {}) => {
   );
 };
 
-// [CART] inactive / unverified / deleted product gulo alada kora
+// [BOOKING] aj (IST)
+const todayYmdIST = () =>
+  new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+// [CART] inactive / unverified / deleted product gulo alada kora.
+// [BOOKING] SERVICE item e date nai ba date past / aj hole badBooking e jay (cart theke muche na)
 const splitLiveItems = async (items) => {
-  if (!items.length) return { live: [], dead: [] };
+  if (!items.length) return { live: [], dead: [], badBooking: [] };
   const ids = [...new Set(items.map((i) => String(i.productId)))];
   const docs = await ProductModel.find({
     _id: { $in: ids },
     isActive: true,
     isVerified: true,
   })
-    .select("_id")
+    .select("_id productType")
     .lean();
-  const liveSet = new Set(docs.map((d) => String(d._id)));
+  const typeMap = new Map(docs.map((d) => [String(d._id), d.productType]));
+  const today = todayYmdIST();
+
   const live = [];
   const dead = [];
+  const badBooking = [];
   for (const i of items) {
-    (liveSet.has(String(i.productId)) ? live : dead).push(i);
+    const type = typeMap.get(String(i.productId));
+    if (!typeMap.has(String(i.productId))) {
+      dead.push(i);
+    } else if (
+      type === "SERVICE" &&
+      (!i.bookingDate || i.bookingDate <= today)
+    ) {
+      badBooking.push(i);
+    } else {
+      live.push(i);
+    }
   }
-  return { live, dead };
+  return { live, dead, badBooking };
 };
+
+const bookingIssuesResponse = (res, badBooking) =>
+  res.status(400).json({
+    success: false,
+    code: "BOOKING_DATE_INVALID",
+    message: `Please choose a valid booking date for: ${badBooking
+      .map((i) => i.name)
+      .join(", ")}`,
+    bookingIssues: badBooking.map((i) => ({
+      itemId: i._id,
+      productId: i.productId,
+      name: i.name,
+      bookingDate: i.bookingDate ?? null,
+    })),
+  });
 
 const toUnavailableItems = (dead) =>
   dead.map((i) => ({
@@ -327,10 +360,14 @@ const groupLinesForCheckout = async (items) => {
   for (const item of items) {
     const p = pMap.get(String(item.productId));
     const pk = pickupGroupKey(p?.pickupAddress);
-    const key = `${item.storeId}|${pk}`;
+    // [BOOKING] shudhu SERVICE er date dhorbo. Alada date = alada order
+    const bookingDate =
+      p?.productType === "SERVICE" ? item.bookingDate || null : null;
+    const key = `${item.storeId}|${pk}|${bookingDate || ""}`;
     if (!groups.has(key)) {
       groups.set(key, {
         storeId: String(item.storeId),
+        bookingDate,
         lines: [],
         itemIds: [],
       });
@@ -688,7 +725,9 @@ const attemptStoreCheckout = async ({
         const fastDelivery = wantsFastest ? delivery : otherDelivery;
 
         const summarize = (d, fast) => {
-          const s = finalizeShipping(d, totalsByType, "PRODUCT", { fastest: fast });
+          const s = finalizeShipping(d, totalsByType, "PRODUCT", {
+            fastest: fast,
+          });
           if (!s) return null;
           return {
             shippingCharge: round2(s.shippingCharge || 0),
@@ -876,7 +915,6 @@ const checkout = async (req, res) => {
       storeIds,
       deliveryAddress,
       note,
-      bookingDate,
       paymentMethod,
       fastestDelivery,
     } = cartCheckoutSchema.parse(req.body);
@@ -894,8 +932,8 @@ const checkout = async (req, res) => {
       items = items.filter((i) => storeIdSet.has(String(i.storeId)));
     }
 
-    // [CART] unavailable product bad dao ar cart theke muche dao
-    const { live, dead } = await splitLiveItems(items);
+    const { live, dead, badBooking } = await splitLiveItems(items);
+    if (badBooking.length > 0) return bookingIssuesResponse(res, badBooking);
     const unavailableItems = toUnavailableItems(dead);
     if (dead.length > 0) {
       await CartModel.updateOne(
@@ -930,7 +968,7 @@ const checkout = async (req, res) => {
           lines: group.lines,
           deliveryAddress,
           note,
-          bookingDate,
+          bookingDate: group.bookingDate, // [BOOKING] ei group er date
           paymentMethod,
           fastestDelivery, // [FASTEST]
         });
@@ -2037,10 +2075,10 @@ const checkoutPreview = async (req, res) => {
         items = items.filter((i) => set.has(String(i.storeId)));
       }
 
-      // [CART] unavailable product bad diye hishab, alada kore janao
-      const { live, dead } = await splitLiveItems(items);
+      const { live, dead, badBooking } = await splitLiveItems(items);
+      if (badBooking.length > 0) return bookingIssuesResponse(res, badBooking);
       unavailableItems = toUnavailableItems(dead);
-      groupList = await groupLinesForCheckout(live); // [PICKUP]
+      groupList = await groupLinesForCheckout(live); 
     } else if (productId) {
       if (!mongoose.isValidObjectId(productId)) {
         return res
