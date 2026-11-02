@@ -4,13 +4,15 @@ const NOTIFICATION_TYPES = [
   // store side
   "NEW_ORDER",
   "ORDER_CANCELLED",
+  "NEW_REVIEW",
   // user side
   "ORDER_PLACED",
   "ORDER_CONFIRMED",
   "ORDER_SHIPPED",
   "ORDER_DELIVERED",
   "NEW_OFFER",
-  "PRICE_QUOTED"
+  "PRICE_QUOTED",
+  "REVIEW_REPLY",
 ];
 
 const notificationSchema = new mongoose.Schema(
@@ -34,6 +36,8 @@ const notificationSchema = new mongoose.Schema(
     title: { type: String, required: true },
     body: { type: String, required: true },
     orderId: { type: mongoose.Schema.Types.ObjectId, ref: "Order" },
+    productId: { type: mongoose.Schema.Types.ObjectId, ref: "Product" },
+    reviewId: { type: mongoose.Schema.Types.ObjectId },
     // NEW_OFFER notification er jonno
     bannerId: { type: mongoose.Schema.Types.ObjectId, ref: "Banner" },
     // notification e dekhanor media (banner er image / gif / video)

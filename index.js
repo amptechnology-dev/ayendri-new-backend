@@ -74,9 +74,11 @@ const paymentRoutes = require("./src/routes/payment.routes.js");
 const deliveryRoutes = require("./src/routes/delivery.routes.js");
 const termsConditionRoutes = require("./src/routes/termsCondition.route.js");
 
+
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
 app.use("/api/product", productRoutes);
+app.use("/api/product", productreviewRoutes);
 app.use("/api/review", reviewRoutes);
 app.use("/api/ads", adsRoutes);
 app.use("/api/category", categoryRoutes);

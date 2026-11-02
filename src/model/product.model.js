@@ -120,14 +120,29 @@ const variantSchema = new mongoose.Schema(
   { timestamps: false },
 );
 
+// store owner-er reply (ekta review-te ekta-i reply)
+const replySchema = new mongoose.Schema(
+  {
+    text: { type: String, required: true, trim: true, maxlength: 1000 },
+    repliedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    repliedAt: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 const reviewSchema = new mongoose.Schema(
   {
-    comment: { type: String, trim: true },
+    comment: { type: String, trim: true, maxlength: 1000 },
     rating: {
       type: Number,
       required: [true, "Rating is required"],
-      min: [1, "Rating must be at least 1"],
+      min: [0.5, "Rating must be at least 0.5"],
       max: [5, "Rating cannot be more than 5"],
+      // half star: 0.5, 1, 1.5 ... 5
+      validate: {
+        validator: (v) => Number.isInteger(v * 2),
+        message: "Rating must be in steps of 0.5",
+      },
     },
     userId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -135,6 +150,7 @@ const reviewSchema = new mongoose.Schema(
       required: true,
     },
     image: { type: String, default: null },
+    reply: { type: replySchema, default: undefined },
   },
   { timestamps: true },
 );

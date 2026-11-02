@@ -285,6 +285,102 @@ const sendOfferToUserBatch = async ({
   }
 };
 
+const sendPushToOwner = async ({ Model, ownerId, title, body, data }) => {
+  if (!isFirebaseConfigured) return;
+
+  const owner = await Model.findById(ownerId).select("fcmTokens").lean();
+  if (!owner?.fcmTokens?.length) return;
+
+  const response = await getMessaging().sendEachForMulticast({
+    notification: { title, body },
+    data,
+    tokens: owner.fcmTokens,
+  });
+
+  const invalidTokens = [];
+  response.responses.forEach((r, idx) => {
+    if (!r.success && INVALID_TOKEN_CODES.includes(r.error?.code)) {
+      invalidTokens.push(owner.fcmTokens[idx]);
+    }
+  });
+  if (invalidTokens.length) {
+    await Model.updateOne(
+      { _id: ownerId },
+      { $pull: { fcmTokens: { $in: invalidTokens } } },
+    );
+  }
+};
+
+const starsText = (rating) => `${Number(rating).toFixed(1)}★`;
+
+// USER review dile -> STORE ke
+const notifyStoreNewReview = async ({ product, review, reviewerName }) => {
+  try {
+    const title = "New Review Received ⭐";
+    const body = `${reviewerName || "A customer"} rated "${product.name}" ${starsText(review.rating)}${
+      review.comment ? `: ${String(review.comment).slice(0, 80)}` : ""
+    }`;
+
+    await NotificationModel.create({
+      storeId: product.storeId,
+      type: "NEW_REVIEW",
+      title,
+      body,
+      productId: product._id,
+      reviewId: review._id,
+    });
+
+    await sendPushToOwner({
+      Model: StoreModel,
+      ownerId: product.storeId,
+      title,
+      body,
+      data: {
+        type: "NEW_REVIEW",
+        productId: String(product._id),
+        reviewId: String(review._id),
+      },
+    });
+  } catch (err) {
+    console.error("notifyStoreNewReview error:", err);
+  }
+};
+
+// STORE reply dile -> oi review er USER ke
+const notifyUserReviewReply = async ({ product, review }) => {
+  try {
+    const store = await StoreModel.findById(product.storeId)
+      .select("storeName")
+      .lean();
+
+    const title = "Seller replied to your review 💬";
+    const body = `${store?.storeName || "The seller"} replied to your review on "${product.name}"`;
+
+    await NotificationModel.create({
+      userId: review.userId,
+      type: "REVIEW_REPLY",
+      title,
+      body,
+      productId: product._id,
+      reviewId: review._id,
+    });
+
+    await sendPushToOwner({
+      Model: UserModel,
+      ownerId: review.userId,
+      title,
+      body,
+      data: {
+        type: "REVIEW_REPLY",
+        productId: String(product._id),
+        reviewId: String(review._id),
+      },
+    });
+  } catch (err) {
+    console.error("notifyUserReviewReply error:", err);
+  }
+};
+
 // offerBanner: true hole shudhu jara ei store visit korechhe (role USER, active) tara pabe
 const notifyUsersNewOffer = async (banner) => {
   try {
@@ -354,4 +450,6 @@ module.exports = {
   notifyUserPriceQuote,
   notifyStorePriceResponse,
   notifyUsersNewOffer,
+  notifyStoreNewReview,
+  notifyUserReviewReply, 
 };

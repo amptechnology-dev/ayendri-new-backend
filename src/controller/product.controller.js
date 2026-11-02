@@ -699,6 +699,8 @@ const getAllProducts = async (req, res) => {
           categoryId: 1,
           userId: 1,
           createdAt: 1,
+          averageRating: 1,
+          totalReviews: 1,
           store: {
             _id: "$store._id",
             storeName: "$store.storeName",
@@ -1065,7 +1067,7 @@ const updateProduct = async (req, res) => {
     if (body.fastestDelivery !== undefined) {
       updateData.fastestDelivery = toBool(body.fastestDelivery);
     }
-        const finalType =
+    const finalType =
       updateData.productType || existingProduct.productType || "PRODUCT";
     if (finalType === "SERVICE") updateData.fastestDelivery = false;
 
@@ -1396,7 +1398,7 @@ const PUBLIC_STORE_FIELDS =
   "storeName storeType storeUniqueId images address lat long contactNo whatsappNo supportNo email description timingByDay isFeatured";
 
 const PRODUCT_LIST_FIELDS =
-  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt productType fastestDelivery isReturnable returnDays isReplaceable replaceDays isRefundable refundDays pickupAddress";
+  "name productCode images description unit mrp offerPrice variants priceTiers gst gstInclusive hsnCode deliveryTime storeId categoryId createdAt productType fastestDelivery isReturnable returnDays isReplaceable replaceDays isRefundable refundDays pickupAddress averageRating totalReviews";
 
 const SORT_MAP = {
   newest: { createdAt: -1 },
@@ -1437,6 +1439,65 @@ const formatProduct = ({ categoryId, pickupAddress, ...product }) => ({
   minTierPrice: getMinTierPrice(product),
   priceOnRequest: isPriceOnRequestProduct(product),
 });
+
+// ---------- [REVIEW] sobcheye beshi rating-er review (tie hole: comment ache > notun) ----------
+const pickTopReview = (reviews = []) => {
+  if (!reviews.length) return null;
+  const hasText = (r) => !!String(r.comment || "").trim();
+
+  return reviews.reduce((best, r) => {
+    if (!best) return r;
+    if (r.rating > best.rating) return r;
+    if (r.rating === best.rating) {
+      if (hasText(r) && !hasText(best)) return r;
+      if (
+        hasText(r) === hasText(best) &&
+        new Date(r.createdAt) > new Date(best.createdAt)
+      ) {
+        return r;
+      }
+    }
+    return best;
+  }, null);
+};
+
+// products er moddhe thaka shob "reviews" array bad diye shudhu maxReview + averageRating + totalReviews rakhe
+const attachTopReviews = async (products) => {
+  const tops = products.map((p) => pickTopReview(p.reviews));
+
+  const userIds = [
+    ...new Set(tops.filter((t) => t?.userId).map((t) => String(t.userId))),
+  ];
+  const users = userIds.length
+    ? await UserModel.find({ _id: { $in: userIds } })
+        .select("name picture")
+        .lean()
+    : [];
+  const userMap = new Map(users.map((u) => [String(u._id), u]));
+
+  return products.map((p, i) => {
+    const { reviews, ...rest } = p;
+    const t = tops[i];
+    const u = t ? userMap.get(String(t.userId)) : null;
+
+    return {
+      ...rest,
+      averageRating: p.averageRating || 0,
+      totalReviews: p.totalReviews || 0,
+      maxReview: t
+        ? {
+            _id: t._id,
+            rating: t.rating,
+            comment: t.comment || "",
+            image: t.image || null,
+            createdAt: t.createdAt,
+            reply: t.reply || null,
+            user: u ? { _id: u._id, name: u.name, picture: u.picture } : null,
+          }
+        : null,
+    };
+  });
+};
 
 // listing e dekhanor jonno product er sobcheye kom offer price (variant / size / simple)
 const getListingPrice = (p) => {
@@ -1570,7 +1631,9 @@ const fetchStoreProducts = async (store, query, categoryId) => {
   let sort;
   if (query.sortBy === "price_asc") sort = { minOfferPrice: 1, _id: -1 };
   else if (query.sortBy === "price_desc") sort = { minOfferPrice: -1, _id: -1 };
-  else sort = { ...(SORT_MAP[query.sortBy] || SORT_MAP.newest), _id: -1 };
+  else if (query.sortBy === "rating") {
+    sort = { averageRating: -1, totalReviews: -1, _id: -1 };
+  } else sort = { ...(SORT_MAP[query.sortBy] || SORT_MAP.newest), _id: -1 };
 
   pipeline.push(
     { $sort: sort },
@@ -1622,6 +1685,10 @@ const fetchStoreProducts = async (store, query, categoryId) => {
               storeId: 1,
               categoryId: { _id: 1, name: 1 },
               createdAt: 1,
+              // [REVIEW] attachTopReviews e reviews array bad diye maxReview banay
+              averageRating: 1,
+              totalReviews: 1,
+              reviews: 1,
             },
           },
         ],
@@ -1631,9 +1698,12 @@ const fetchStoreProducts = async (store, query, categoryId) => {
   );
 
   const [result] = await ProductModel.aggregate(pipeline);
-  const products = result?.data || [];
+  const rawProducts = result?.data || [];
   const totalProducts = result?.totalCount?.[0]?.count || 0;
   const totalPages = Math.ceil(totalProducts / limit);
+
+  // [REVIEW] maxReview + rating
+  const products = await attachTopReviews(rawProducts);
 
   // [FAST] normal + (dorkar hole) fastest delivery
   const { base: delivery, pick } = await buildDeliveryPicker({
@@ -1761,13 +1831,13 @@ const getStoreProducts = async (req, res) => {
       match.$or = [{ name: regex }, { productCode: regex }];
     }
 
-    // [GST] [FAST] PRODUCT_LIST_FIELDS e gst, gstInclusive, fastestDelivery ache
+    // [GST] [FAST] PRODUCT_LIST_FIELDS e gst, gstInclusive, fastestDelivery, averageRating, totalReviews ache
+    // [REVIEW] reviews populate lagbe na, attachTopReviews nijei user ane
     let products = await ProductModel.find(match)
       .select(
-        `${PRODUCT_LIST_FIELDS} stock hasVariants hasColor hasStockManagement isMadeForProduct reviews averageRating totalReviews`,
+        `${PRODUCT_LIST_FIELDS} stock hasVariants hasColor hasStockManagement isMadeForProduct reviews`,
       )
       .populate("categoryId", "name")
-      .populate({ path: "reviews.userId", select: "name picture" })
       .lean();
 
     const getOfferPrices = (p) => {
@@ -1806,6 +1876,9 @@ const getStoreProducts = async (req, res) => {
       });
     }
 
+    // [REVIEW] reviews array bad, maxReview + averageRating + totalReviews add
+    products = await attachTopReviews(products);
+
     // [FAST] normal + (dorkar hole) fastest delivery
     const { base: delivery, pick } = await buildDeliveryPicker({
       storeId: store._id,
@@ -1818,17 +1891,9 @@ const getStoreProducts = async (req, res) => {
       const prices = getOfferPrices(p);
       const minOfferPrice = prices.length ? Math.min(...prices) : null;
 
-      const reviews = p.reviews || [];
-      const maxReview =
-        reviews.length > 0
-          ? [...reviews].sort((a, b) => b.rating - a.rating)[0]
-          : null;
-
       return {
-        ...formatProduct(p), // [GST] formatProduct er bhetor theke GST ashe
+        ...formatProduct(p), // [GST] + [REVIEW] averageRating, totalReviews, maxReview
         minOfferPrice,
-        reviews,
-        maxReview,
         delivery: pick(p), // [FAST]
       };
     });
@@ -1844,6 +1909,12 @@ const getStoreProducts = async (req, res) => {
       products.sort((a, b) => b.name.localeCompare(a.name));
     } else if (sortBy === "oldest") {
       products.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    } else if (sortBy === "rating") {
+      // [REVIEW] sobcheye beshi rating age
+      products.sort(
+        (a, b) =>
+          b.averageRating - a.averageRating || b.totalReviews - a.totalReviews,
+      );
     } else {
       products.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     }
@@ -1915,14 +1986,15 @@ const getStoreSingleProduct = async (req, res) => {
     const store = await getPublicStore(storeUniqueId);
     if (!store) return sendStoreUnavailable(res);
 
-    // "-userId -__v" exclude kore, tai gst, gstInclusive, fastestDelivery + policy field automatic ashe
+    // "-userId -__v -reviews" exclude kore. [REVIEW] reviews alada API theke ashe,
+    // averageRating + totalReviews ekhane thakbe
     const product = await ProductModel.findOne({
       _id: productId,
       storeId: store._id,
       isActive: true,
       isVerified: true,
     })
-      .select("-userId -__v")
+      .select("-userId -__v -reviews")
       .populate("categoryId", "name")
       .lean();
 
@@ -2043,14 +2115,20 @@ const getBookingAvailability = async (req, res) => {
     if (!limit) {
       return res
         .status(200)
-        .json({ success: true, limited: false, dailyBookingLimit: null, days: [] });
+        .json({
+          success: true,
+          limited: false,
+          dailyBookingLimit: null,
+          days: [],
+        });
     }
 
     const todayIST = new Date(Date.now() + 5.5 * 60 * 60 * 1000)
       .toISOString()
       .slice(0, 10);
     const fromQ = String(req.query.from || "");
-    const from = /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && fromQ >= todayIST ? fromQ : todayIST;
+    const from =
+      /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && fromQ >= todayIST ? fromQ : todayIST;
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 60);
 
     const dates = Array.from({ length: days }, (_, i) => ymdAddDays(from, i));
@@ -2094,5 +2172,5 @@ module.exports = {
   getStoreProductsByCategory,
   getStoreSingleProduct,
   getProductPickupAddress,
-  getBookingAvailability
+  getBookingAvailability,
 };
