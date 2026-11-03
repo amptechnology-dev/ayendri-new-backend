@@ -3,7 +3,7 @@ const CartModel = require("../model/cart.model.js");
 const OrderModel = require("../model/order.model.js");
 const ProductModel = require("../model/product.model.js");
 const StoreModel = require("../model/store.model.js");
-// [নতুন] pickup pincode + handling time ekhane thake
+const { processInvoice } = require("../helper/invoice.js");
 const StoreDeliveryModel = require("../model/storeDelivery.model.js");
 const {
   cartCheckoutSchema,
@@ -285,6 +285,13 @@ const notifyPickupContact = (order, { force = false } = {}) => {
 
   sendPickupContactOrderMail({ order }).catch((e) =>
     console.error("Pickup order mail error:", e.message),
+  );
+};
+
+const notifyInvoice = (order) => {
+  if (!order?._id) return;
+  processInvoice(order._id).catch((e) =>
+    console.error("Invoice error:", e.message),
   );
 };
 
@@ -1013,6 +1020,7 @@ const checkout = async (req, res) => {
       notifyNewOrder(order);
       notifyUserOrderStatus(order);
       notifyPickupContact(order); // [MAIL]
+      notifyInvoice(order);
     }
 
     return res.status(201).json({
@@ -1076,7 +1084,8 @@ const buyNow = async (req, res) => {
 
     notifyNewOrder(result.order);
     notifyUserOrderStatus(result.order);
-    notifyPickupContact(result.order); // [MAIL]
+    notifyPickupContact(result.order); 
+    notifyInvoice(result.order);
 
     return res.status(201).json({
       success: true,
@@ -1480,6 +1489,7 @@ const respondToQuote = async (req, res) => {
     }
 
     notifyStorePriceResponse(order, action === "ACCEPT");
+    if (action === "ACCEPT") notifyInvoice(order);
 
     return res.status(200).json({
       success: true,

@@ -11,6 +11,7 @@ const {
   verifyPaymentWithPayU,
 } = require("../helper/payu.js");
 const { restoreOrderStock } = require("./order.controller.js");
+const { processInvoice } = require("../helper/invoice.js");
 
 const BACKEND_URL = process.env.BACKEND_URL;
 const FRONTEND_URL = process.env.FRONTEND_URL;
@@ -192,6 +193,11 @@ const applyPaymentResult = async (payload) => {
       },
       { new: true },
     ).lean();
+     if (updated) {
+      processInvoice(updated._id).catch((e) =>
+        console.error("Invoice error:", e.message),
+      );
+    }
     return { order: updated || order, success: true };
   }
 

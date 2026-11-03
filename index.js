@@ -73,6 +73,7 @@ const installRoutes = require("./src/routes/install.routes.js");
 const paymentRoutes = require("./src/routes/payment.routes.js");
 const deliveryRoutes = require("./src/routes/delivery.routes.js");
 const termsConditionRoutes = require("./src/routes/termsCondition.route.js");
+const reportRoutes = require("./src/routes/report.route.js")
 
 
 app.use("/api/register", registerRoutes);
@@ -102,6 +103,7 @@ app.use("/api/install", installRoutes);
 app.use("/api/payment", paymentRoutes);
 app.use("/api/delivery", deliveryRoutes);
 app.use("/api/terms-conditions", termsConditionRoutes);
+app.use("/api/report",reportRoutes)
 
 setInterval(() => {
   expireUnpaidOrders().catch((e) => console.error("Expire orders error:", e));

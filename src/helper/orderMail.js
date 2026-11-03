@@ -87,7 +87,7 @@ const sendNewOrderEmailToStore = async ({ toEmail, storeName, order }) => {
     `;
 
     await transporter.sendMail({
-      from: `"AMP Store Management" <${process.env.EMAIL_USER}>`,
+      from: `"Ayendri" <${process.env.EMAIL_USER}>`,
       to: toEmail,
       subject: `New Order Received - #${order.orderNumber}`,
       html: baseWrapper("New Order Received 🛒", body),
@@ -198,8 +198,65 @@ const sendOrderStatusUpdateToUser = async ({
   }
 };
 
+// ===== 4. User ke invoice PDF attach kore mail =====
+const sendInvoiceEmailToUser = async ({
+  toEmail,
+  userName,
+  order,
+  pdfBuffer,
+  fileName,
+}) => {
+  try {
+    if (!toEmail || !pdfBuffer) return false;
+
+    const body = `
+      <p>Hello ${escapeHtml(userName) || "Customer"},</p>
+      <p>Thank you for your order. Your invoice is attached to this email as a PDF.</p>
+      <table style="width:100%; border-collapse: collapse; margin-top:10px;">
+        <tr>
+          <td style="padding:8px; border:1px solid #ddd;"><strong>Invoice Number</strong></td>
+          <td style="padding:8px; border:1px solid #ddd;">${escapeHtml(order.invoiceNumber)}</td>
+        </tr>
+        <tr>
+          <td style="padding:8px; border:1px solid #ddd;"><strong>Order Number</strong></td>
+          <td style="padding:8px; border:1px solid #ddd;">${escapeHtml(order.orderNumber)}</td>
+        </tr>
+        <tr>
+          <td style="padding:8px; border:1px solid #ddd;"><strong>Store</strong></td>
+          <td style="padding:8px; border:1px solid #ddd;">${escapeHtml(order.storeName)}</td>
+        </tr>
+        <tr>
+          <td style="padding:8px; border:1px solid #ddd;"><strong>Total Amount</strong></td>
+          <td style="padding:8px; border:1px solid #ddd;">${formatMoney(order.totalAmount)}</td>
+        </tr>
+      </table>
+    `;
+
+    await transporter.sendMail({
+      from: `"Ayendri" <${process.env.EMAIL_USER}>`,
+      to: toEmail,
+      subject: `Invoice for Order #${order.orderNumber}`,
+      html: baseWrapper("Your Invoice 🧾", body),
+      attachments: [
+        {
+          filename: fileName || `invoice-${order.orderNumber}.pdf`,
+          content: pdfBuffer,
+          contentType: "application/pdf",
+        },
+      ],
+    });
+
+    console.log("Invoice email sent to user ✅");
+    return true;
+  } catch (error) {
+    console.error("Invoice email (user) failed:", error);
+    return false;
+  }
+};
+
 module.exports = {
   sendNewOrderEmailToStore,
   sendOrderConfirmationToUser,
   sendOrderStatusUpdateToUser,
+  sendInvoiceEmailToUser,
 };

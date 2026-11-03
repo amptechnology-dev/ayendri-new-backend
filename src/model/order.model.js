@@ -370,6 +370,11 @@ const orderSchema = new mongoose.Schema(
     // ONLINE unpaid order auto-cancel er jonno
     paymentExpiresAt: { type: Date, default: null },
 
+    invoiceUrl: { type: String, default: null },
+    invoiceNumber: { type: String, default: null },
+    invoiceGeneratedAt: { type: Date, default: null },
+    invoiceEmailSentAt: { type: Date, default: null },
+
     status: { type: String, enum: ORDER_STATUSES, default: "PENDING" },
     statusHistory: [statusHistorySchema],
 
