@@ -35,4 +35,23 @@ const invalidateChatContextCache = () => {
   cacheExpiresAt = 0;
 };
 
-module.exports = { getChatContextForAI, invalidateChatContextCache };
+// store page theke chat hole oi store er public info AI ke dao
+const getStoreContextForAI = async (storeId) => {
+  if (!storeId) return "";
+  const store = await StoreModel.findOne({ _id: storeId, ...AVAILABLE_STORE_FILTER })
+    .select("storeName storeType description timingByDay supportNo whatsappNo address")
+    .lean();
+  if (!store) return "";
+
+  const lines = [`- The customer is currently viewing the store "${store.storeName}" (${store.storeType}).`];
+  if (store.description) lines.push(`- Store description: ${store.description}`);
+  if (store.address?.area || store.address?.state)
+    lines.push(`- Store location: ${[store.address.area, store.address.state].filter(Boolean).join(", ")}`);
+  if (store.supportNo) lines.push(`- Store support number: ${store.supportNo}`);
+  if (store.whatsappNo) lines.push(`- Store WhatsApp: ${store.whatsappNo}`);
+  const days = Object.entries(store.timingByDay || {}).filter(([, v]) => v);
+  if (days.length) lines.push(`- Store timings: ${days.map(([d, t]) => `${d}: ${t}`).join("; ")}`);
+  return lines.join("\n");
+};
+
+module.exports = { getChatContextForAI, invalidateChatContextCache, getStoreContextForAI };

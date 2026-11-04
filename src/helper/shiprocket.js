@@ -420,6 +420,26 @@ const generatePickup = (shipmentId) =>
     body: { shipment_id: [shipmentId] },
   });
 
+  const cancelShipment = async ({ awb, shiprocketOrderId }) => {
+  if (!isConfigured()) {
+    throw new ShiprocketError("Courier service is not configured");
+  }
+  if (awb) {
+    await request("POST", "/orders/cancel/shipment/awbs", {
+      body: { awbs: [String(awb)] },
+    });
+  }
+  if (shiprocketOrderId) {
+    try {
+      await request("POST", "/orders/cancel", {
+        body: { ids: [shiprocketOrderId] },
+      });
+    } catch (err) {
+      if (!awb) throw err; // AWB cancel hoye gele order cancel er error ignore
+    }
+  }
+};
+
 // ---------- parcel weight / size (product packagingDetails theke) ----------
 const num = (v) => {
   const n = Number(v);

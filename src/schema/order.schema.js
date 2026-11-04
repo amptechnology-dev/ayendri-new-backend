@@ -4,13 +4,7 @@ const objectIdSchema = z
   .string()
   .regex(/^[a-fA-F0-9]{24}$/, "Invalid ObjectId");
 
-const ORDER_STATUSES = [
-  "PENDING",
-  "CONFIRMED",
-  "SHIPPED",
-  "DELIVERED",
-  "CANCELLED",
-];
+const ORDER_STATUSES = ["CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
 
 // [PAYMENT] COD ar PayU online
 const PAYMENT_METHODS = ["COD", "ONLINE"];
@@ -187,10 +181,8 @@ const completeRequestSchema = z.object({
 });
 
 const updateOrderStatusSchema = z.object({
-  status: z.enum(ORDER_STATUSES),
+  status: z.enum(["DELIVERED", "CANCELLED"]),
   note: z.string().trim().optional(),
-  // SHIPPED korar somoy pathano jabe (order e age theke na thakle required)
-  expectedDeliveryDate: deliveryDateSchema.optional(),
 });
 
 const updateDeliveryDateSchema = z.object({

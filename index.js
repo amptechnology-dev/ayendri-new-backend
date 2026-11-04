@@ -5,6 +5,7 @@ const cors = require("cors");
 const Conect = require("./src/db/Connent.js");
 const cookieParser = require("cookie-parser");
 const { expireUnpaidOrders } = require("./src/controller/payment.controller.js");
+const { processDueShipments } = require("./src/helper/fulfilment.js");
 
 dotenv.config();
 
@@ -110,6 +111,11 @@ app.use("/api/chatbot",chatBoatRoutes)
 setInterval(() => {
   expireUnpaidOrders().catch((e) => console.error("Expire orders error:", e));
 }, 5 * 60 * 1000);
+
+setInterval(
+  () => processDueShipments().catch((e) => console.error("Shipment cron:", e.message)),
+  5 * 60 * 1000,
+);
 
 const port = process.env.PORT || 8090;
 

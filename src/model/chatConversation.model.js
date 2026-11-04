@@ -8,6 +8,7 @@ const chatConversationSchema = new mongoose.Schema(
     phoneNumber: { type: String, trim: true, index: true, default: "" },
     status: { type: String, enum: ["active", "closed"], default: "active" },
     lastMessageAt: { type: Date, default: Date.now },
+    storeId: { type: mongoose.Schema.Types.ObjectId, ref: "Store", default: null, index: true },
   },
   { timestamps: true },
 );

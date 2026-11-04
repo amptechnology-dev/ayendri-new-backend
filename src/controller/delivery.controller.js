@@ -843,6 +843,9 @@ const safeEqual = (a, b) => {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 };
 
+const PICKED_RE = /(PICKED UP|IN TRANSIT|OUT FOR DELIVERY|REACHED AT DESTINATION|SHIPPED)/i;
+const BAD_RE = /(RTO|UNDELIVERED|CANCEL)/i;
+
 const courierWebhook = async (req, res) => {
   try {
     const secret = process.env.SHIPROCKET_WEBHOOK_TOKEN;
@@ -852,9 +855,7 @@ const courierWebhook = async (req, res) => {
 
     const body = req.body || {};
     const awb = String(body.awb || body.awb_code || "").trim();
-    const rawStatus = String(
-      body.current_status || body.shipment_status || "",
-    ).trim();
+    const rawStatus = String(body.current_status || body.shipment_status || "").trim();
 
     if (!awb || !rawStatus) {
       return res.status(200).json({ success: true, ignored: true });
@@ -871,18 +872,14 @@ const courierWebhook = async (req, res) => {
       "shipment.status": rawStatus,
       "shipment.lastEventAt": parseDate(body.current_timestamp) || new Date(),
     };
+    if (body.courier_name) set["shipment.courierName"] = String(body.courier_name);
 
-    if (body.courier_name)
-      set["shipment.courierName"] = String(body.courier_name);
-
-    // courier er nijer ETD (customer ke dekhano estimate er cheye nirbhorjogyo)
     const etd = parseDate(body.etd);
     if (etd) {
       set["shipment.etd"] = etd;
       set["shipment.etdSource"] = "COURIER";
     }
 
-    // tracking history (replace, tai duplicate webhook e double hoy na)
     if (Array.isArray(body.scans) && body.scans.length > 0) {
       set["shipment.events"] = body.scans
         .map((s) => ({
@@ -897,29 +894,46 @@ const courierWebhook = async (req, res) => {
 
     await OrderModel.updateOne({ _id: order._id }, { $set: set });
 
-    if (rawStatus.toUpperCase() === "DELIVERED" && order.status === "SHIPPED") {
+    const up = rawStatus.toUpperCase();
+    let updated = null;
+
+    // ---------- DELIVERED (CONFIRMED / SHIPPED theke) ----------
+    if (up === "DELIVERED" && ["CONFIRMED", "SHIPPED"].includes(order.status)) {
       const extra =
         order.paymentMethod === "COD"
           ? { paymentStatus: "PAID", paidAt: new Date() }
           : {};
 
-      const updated = await OrderModel.findOneAndUpdate(
-        { _id: order._id, status: "SHIPPED" },
+      updated = await OrderModel.findOneAndUpdate(
+        { _id: order._id, status: { $in: ["CONFIRMED", "SHIPPED"] } },
         {
-          $set: { status: "DELIVERED", ...extra },
+          $set: { status: "DELIVERED", shipmentDone: true, autoShip: false, ...extra },
           $push: {
-            statusHistory: {
-              status: "DELIVERED",
-              note: "Delivered by courier",
-              at: new Date(),
-            },
+            statusHistory: { status: "DELIVERED", note: "Delivered by courier", at: new Date() },
           },
         },
         { new: true },
       ).lean();
-
-      if (updated) notifyUserOrderStatus(updated);
     }
+    // ---------- SHIPPED (courier pickup / transit) ----------
+    else if (
+      PICKED_RE.test(rawStatus) &&
+      !BAD_RE.test(rawStatus) &&
+      order.status === "CONFIRMED"
+    ) {
+      updated = await OrderModel.findOneAndUpdate(
+        { _id: order._id, status: "CONFIRMED" },
+        {
+          $set: { status: "SHIPPED" },
+          $push: {
+            statusHistory: { status: "SHIPPED", note: "Picked up by courier", at: new Date() },
+          },
+        },
+        { new: true },
+      ).lean();
+    }
+
+    if (updated) notifyUserOrderStatus(updated);
 
     return res.status(200).json({ success: true });
   } catch (error) {

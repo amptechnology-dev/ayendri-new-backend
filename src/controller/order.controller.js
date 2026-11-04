@@ -71,29 +71,26 @@ const { OrderRequestModel } = require("../model/orderRequest.model.js");
 const { checkCancelRefund } = require("../helper/orderRefund.js");
 const { snapshotPolicy } = require("../helper/productPolicy.js");
 const BookingSlotModel = require("../model/bookingSlot.model.js");
+const { cancelShipment } = require("../helper/shiprocket.js");
+const { startFulfilment } = require("../helper/fulfilment.js");
 
 // ===================== CONSTANTS / HELPERS =====================
-const ORDER_STATUSES = [
-  "PENDING",
-  "CONFIRMED",
-  "SHIPPED",
-  "DELIVERED",
-  "CANCELLED",
-];
+const ORDER_STATUSES = ["CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
 
-// frontend er getNextStatuses er sathe mil rakho
+// SHIPPED sudhu Shiprocket webhook theke hoy
 const ALLOWED_TRANSITIONS = {
-  PENDING: ["CONFIRMED", "CANCELLED"],
-  CONFIRMED: ["SHIPPED", "CANCELLED"],
+  CONFIRMED: ["SHIPPED", "DELIVERED", "CANCELLED"],
   SHIPPED: ["DELIVERED"],
   DELIVERED: [],
   CANCELLED: [],
 };
 
+const STORE_MANUAL_STATUSES = ["DELIVERED", "CANCELLED"];
+
+const DELIVERY_DATE_EDITABLE = ["CONFIRMED", "SHIPPED"];
+
 const CUSTOMER_FIELDS = "name phone email";
 const MAX_LIMIT = 100;
-
-const DELIVERY_DATE_EDITABLE = ["PENDING", "CONFIRMED", "SHIPPED"];
 
 // [PAYMENT] ONLINE order e payment korar time limit
 const PAYMENT_WINDOW_MS = 30 * 60 * 1000;
@@ -196,6 +193,28 @@ const rollbackLines = (lines) =>
       }),
     ),
   );
+
+const kickOffShipment = (order) => {
+  if (!order?.autoShip) return;
+  startFulfilment(order._id).catch((e) =>
+    console.error("Auto shipment error:", e.message),
+  );
+};
+
+// Shiprocket e shipment thakle cancel kore. Fail hole error message ferot dey
+const cancelCourier = async (order) => {
+  const s = order?.shipment;
+  if (!s?.shiprocketOrderId && !s?.awb) return null;
+  try {
+    await cancelShipment({
+      awb: s.awb,
+      shiprocketOrderId: s.shiprocketOrderId,
+    });
+    return null;
+  } catch (err) {
+    return err.message || "Courier shipment could not be cancelled";
+  }
+};
 
 // ===================== [BOOKING LIMIT] =====================
 const dateKey = (d) => new Date(d).toISOString().slice(0, 10);
@@ -788,6 +807,8 @@ const attemptStoreCheckout = async ({
       ? new Date(Date.now() + PAYMENT_WINDOW_MS)
       : null;
 
+  const isCourier = policy.hasDelivery && shippingInfo?.mode === "NATIONAL";
+
   // ---------- order create fail korle stock ferot dao ----------
   let order;
   try {
@@ -825,8 +846,22 @@ const attemptStoreCheckout = async ({
       paymentOff,
       paymentStatus: "PENDING",
       paymentExpiresAt,
-      status: "PENDING",
-      statusHistory: [{ status: "PENDING", changedBy: userId, at: new Date() }],
+
+      status: "CONFIRMED",
+      statusHistory: [
+        {
+          status: "CONFIRMED",
+          changedBy: userId,
+          note: "Order placed",
+          at: new Date(),
+        },
+      ],
+
+      autoShip: isCourier,
+      // booking date thakle oi din theke, nahole ekhoni
+      shipStartDate:
+        hasService && bookingDate ? toDeliveryDate(bookingDate) : new Date(),
+      expectedDeliveryDate: shippingInfo?.estimatedMaxDate || null,
     });
   } catch (err) {
     await rollbackLines(decrementedLines);
@@ -1021,6 +1056,7 @@ const checkout = async (req, res) => {
       notifyUserOrderStatus(order);
       notifyPickupContact(order); // [MAIL]
       notifyInvoice(order);
+      kickOffShipment(order); // [AUTO SHIP]
     }
 
     return res.status(201).json({
@@ -1084,8 +1120,9 @@ const buyNow = async (req, res) => {
 
     notifyNewOrder(result.order);
     notifyUserOrderStatus(result.order);
-    notifyPickupContact(result.order); 
+    notifyPickupContact(result.order);
     notifyInvoice(result.order);
+    kickOffShipment(result.order);
 
     return res.status(201).json({
       success: true,
@@ -1292,6 +1329,14 @@ const cancelMyOrder = async (req, res) => {
       }
     }
 
+    const courierErr = await cancelCourier(existing);
+    if (courierErr) {
+      return res.status(409).json({
+        success: false,
+        message: `Courier shipment could not be cancelled (${courierErr}). Please try again`,
+      });
+    }
+
     // atomic claim: ekta request-i jitbe, tai stock ekbar-i restore hobe.
     // paymentStatus filter e race guard (ei majhe payment status bodle gele cancel hobe na)
     const order = await transitionOrder({
@@ -1378,7 +1423,7 @@ const respondToQuote = async (req, res) => {
     }
 
     if (
-      existing.status !== "PENDING" ||
+      existing.status !== "CONFIRMED" ||      // PENDING chhilo
       existing.priceStatus !== "QUOTED" ||
       !existing.quote
     ) {
@@ -1473,7 +1518,7 @@ const respondToQuote = async (req, res) => {
       {
         _id: orderId,
         userId,
-        status: "PENDING",
+        status: "CONFIRMED",
         priceStatus: "QUOTED",
         "quote.quotedAt": existing.quote.quotedAt,
       },
@@ -1489,7 +1534,10 @@ const respondToQuote = async (req, res) => {
     }
 
     notifyStorePriceResponse(order, action === "ACCEPT");
-    if (action === "ACCEPT") notifyInvoice(order);
+     if (action === "ACCEPT") {
+      notifyInvoice(order);
+      kickOffShipment(order); 
+    }
 
     return res.status(200).json({
       success: true,
@@ -1751,7 +1799,7 @@ const updateOrderStatus = async (req, res) => {
       status,
       note,
       userId,
-      extra,
+      extra: { cancelReason: reason, cancelledBy: "USER", autoShip: false },
       populateUser: true, // frontend merge e customer jeno na hariye jay
     });
 
@@ -1874,7 +1922,7 @@ const submitQuote = async (req, res) => {
       });
     }
 
-    if (existing.status !== "PENDING") {
+    if (existing.status !== "CONFIRMED") {
       return res.status(400).json({
         success: false,
         message: `Price cannot be set once order is ${existing.status}`,
@@ -1929,7 +1977,7 @@ const submitQuote = async (req, res) => {
     const order = await OrderModel.findOneAndUpdate(
       {
         _id: orderId,
-        status: "PENDING",
+        status: "CONFIRMED",
         priceStatus: { $in: QUOTE_PENDING_STATUSES },
       },
       {
@@ -2088,7 +2136,7 @@ const checkoutPreview = async (req, res) => {
       const { live, dead, badBooking } = await splitLiveItems(items);
       if (badBooking.length > 0) return bookingIssuesResponse(res, badBooking);
       unavailableItems = toUnavailableItems(dead);
-      groupList = await groupLinesForCheckout(live); 
+      groupList = await groupLinesForCheckout(live);
     } else if (productId) {
       if (!mongoose.isValidObjectId(productId)) {
         return res

@@ -12,6 +12,7 @@ const {
 } = require("../helper/payu.js");
 const { restoreOrderStock } = require("./order.controller.js");
 const { processInvoice } = require("../helper/invoice.js");
+const { startFulfilment } = require("../helper/fulfilment.js"); // 🔥 CHANGED (1): import
 
 const BACKEND_URL = process.env.BACKEND_URL;
 const FRONTEND_URL = process.env.FRONTEND_URL;
@@ -193,9 +194,16 @@ const applyPaymentResult = async (payload) => {
       },
       { new: true },
     ).lean();
-     if (updated) {
+
+    // updated thakle mane ei call ei PAID set hoyeche (duplicate callback e null ashbe)
+    if (updated) {
       processInvoice(updated._id).catch((e) =>
         console.error("Invoice error:", e.message),
+      );
+
+      // 🔥 CHANGED (2): PAID save howar por auto fulfilment/shipment
+      startFulfilment(updated._id).catch((e) =>
+        console.error("Auto shipment error:", e.message),
       );
     }
     return { order: updated || order, success: true };
@@ -302,8 +310,9 @@ const verifyPayment = async (req, res) => {
 const expireUnpaidOrders = async () => {
   const expired = await OrderModel.find({
     paymentMethod: "ONLINE",
-    paymentStatus: { $in: ["PENDING", "INITIATED", "FAILED"] },
-    status: "PENDING",
+    // 🔥 CHANGED (3): order auto-CONFIRMED hole-o unpaid hole cancel hobe
+    status: { $in: ["PENDING", "CONFIRMED"] },
+    paymentStatus: { $ne: "PAID" },
     paymentExpiresAt: { $lte: new Date() },
   })
     .select("_id userId")
@@ -313,8 +322,8 @@ const expireUnpaidOrders = async () => {
     const cancelled = await OrderModel.findOneAndUpdate(
       {
         _id: o._id,
-        status: "PENDING",
-        paymentStatus: { $in: ["PENDING", "INITIATED", "FAILED"] },
+        status: { $in: ["PENDING", "CONFIRMED"] }, // 🔥 CHANGED (3)
+        paymentStatus: { $ne: "PAID" }, // race guard: ei moddhe PAID hoye gele cancel hobe na
       },
       {
         $set: {

@@ -7,7 +7,8 @@ const { buildReportFile } = require("../helper/reportExport.js");
 
 // ===================== helpers =====================
 const MAX_ROWS = 5000; // ekta report e max koto row (excel / pdf er jonno)
-const ORDER_STATUSES = ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+const ORDER_STATUSES = ["CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+const OPEN_STATUSES = ["CONFIRMED", "SHIPPED"]; // "pending" report = ekhono shesh hoyni
 const FORMATS = ["xlsx", "csv", "pdf"];
 
 class ReportError extends Error {
@@ -104,13 +105,20 @@ const parseTop = (v) => {
 
 const STORE_COL = { key: "store", header: "Store", type: "text", width: 22 };
 
-// ===================== 1. ORDERS (all / pending) =====================
+const variantOf = (i) =>
+  [i.color, i.size, i.weight, i.height].filter(Boolean).join(" / ");
+
+const addressOf = (a = {}) =>
+  [a.addressLine, a.area, a.city, a.state, a.pincode, a.country]
+    .filter(Boolean)
+    .join(", ");
+
 const ordersReport = (mode) => async (ctx) => {
   const { query } = ctx;
   const extra = {};
 
   if (mode === "pending") {
-    extra.status = { $in: ["PENDING", "CONFIRMED"] };
+    extra.status = { $in: OPEN_STATUSES };
   } else if (query.status) {
     if (!ORDER_STATUSES.includes(query.status)) throw new ReportError(400, "Invalid status");
     extra.status = query.status;
@@ -118,27 +126,40 @@ const ordersReport = (mode) => async (ctx) => {
 
   const orders = await OrderModel.find(orderMatch(ctx, extra))
     .select(
-      "orderNumber createdAt storeId status paymentMethod paymentStatus totalAmount totalItems shippingCharge deliveryAddress.fullName deliveryAddress.phone deliveryAddress.city",
+      "orderNumber createdAt storeId status paymentMethod paymentStatus paymentOff totalAmount shippingCharge userId deliveryAddress items.name items.quantity items.color items.size items.weight items.height items.lineTotal items.lineTotalWithGst",
     )
+    .populate("userId", "name")
     .sort(mode === "pending" ? { createdAt: 1, _id: 1 } : { createdAt: -1, _id: -1 })
     .limit(MAX_ROWS)
     .lean();
 
   const now = Date.now();
-  const rows = orders.map((o) => ({
-    orderNumber: o.orderNumber,
-    createdAt: o.createdAt,
-    store: ctx.storeName.get(String(o.storeId)) || "",
-    customer: o.deliveryAddress?.fullName || "",
-    phone: o.deliveryAddress?.phone || "",
-    city: o.deliveryAddress?.city || "",
-    status: o.status,
-    payment: `${o.paymentMethod} / ${o.paymentStatus}`,
-    items: o.totalItems || 0,
-    shipping: round2(o.shippingCharge),
-    total: round2(o.totalAmount),
-    ageDays: Math.floor((now - new Date(o.createdAt).getTime()) / 86400000),
-  }));
+
+  // proti product item er jonno ekta row
+  const rows = orders.flatMap((o) => {
+    const base = {
+      orderNumber: o.orderNumber,
+      createdAt: o.createdAt,
+      store: ctx.storeName.get(String(o.storeId)) || "",
+      customer: o.userId?.name || o.deliveryAddress?.fullName || "",
+      phone: o.deliveryAddress?.phone || "",
+      address: addressOf(o.deliveryAddress),
+      status: o.status,
+      payment: o.paymentOff ? "Paid to store" : `${o.paymentMethod} / ${o.paymentStatus}`,
+      shipping: round2(o.shippingCharge),
+      total: round2(o.totalAmount),
+      ageDays: Math.floor((now - new Date(o.createdAt).getTime()) / 86400000),
+    };
+
+    const items = o.items?.length ? o.items : [{}];
+    return items.map((i) => ({
+      ...base,
+      product: i.name || "",
+      variant: variantOf(i),
+      qty: i.quantity || 0,
+      itemTotal: round2(i.lineTotalWithGst ?? i.lineTotal ?? 0),
+    }));
+  });
 
   const columns = [
     { key: "orderNumber", header: "Order #", type: "text", width: 14 },
@@ -146,33 +167,43 @@ const ordersReport = (mode) => async (ctx) => {
     STORE_COL,
     { key: "customer", header: "Customer", type: "text", width: 22 },
     { key: "phone", header: "Phone", type: "text", width: 14 },
-    { key: "city", header: "City", type: "text", width: 16 },
+    { key: "address", header: "Delivery Address", type: "text", width: 46 },
+    { key: "product", header: "Product", type: "text", width: 30 },
+    { key: "variant", header: "Variant", type: "text", width: 18 },
+    { key: "qty", header: "Qty", type: "number", width: 8 },
+    { key: "itemTotal", header: "Item Total", type: "money", width: 14 },
+    ...(mode === "pending"
+      ? [{ key: "ageDays", header: "Waiting (days)", type: "number", width: 12 }]
+      : []),
     { key: "status", header: "Status", type: "text", width: 12 },
     { key: "payment", header: "Payment", type: "text", width: 18 },
-    { key: "items", header: "Items", type: "number", width: 8 },
     { key: "shipping", header: "Shipping", type: "money", width: 12 },
-    { key: "total", header: "Total", type: "money", width: 14 },
+    { key: "total", header: "Order Total", type: "money", width: 14 },
   ];
 
+  // summary order theke hishab (row theke korle order number repeat e double hoto)
+  const orderTotal = (o) => round2(o.totalAmount);
   let summary;
+
   if (mode === "pending") {
-    columns.splice(7, 0, { key: "ageDays", header: "Waiting (days)", type: "number", width: 12 });
+    const oldest = orders.length
+      ? Math.floor((now - new Date(orders[0].createdAt).getTime()) / 86400000)
+      : 0;
     summary = [
-      { label: "Pending orders", value: rows.length, type: "number" },
-      { label: "Pending value", value: round2(rows.reduce((s, r) => s + r.total, 0)), type: "money" },
-      { label: "Oldest pending (days)", value: rows.length ? rows[0].ageDays : 0, type: "number" },
-      { label: "Awaiting confirm", value: rows.filter((r) => r.status === "PENDING").length, type: "number" },
+      { label: "Open orders", value: orders.length, type: "number" },
+      { label: "Open value", value: round2(orders.reduce((s, o) => s + orderTotal(o), 0)), type: "money" },
+      { label: "Oldest open (days)", value: oldest, type: "number" },
+      { label: "Shipped (in transit)", value: orders.filter((o) => o.status === "SHIPPED").length, type: "number" },
     ];
   } else {
-    const count = (s) => rows.filter((r) => r.status === s).length;
+    const count = (s) => orders.filter((o) => o.status === s).length;
     summary = [
-      { label: "Total orders", value: rows.length, type: "number" },
+      { label: "Total orders", value: orders.length, type: "number" },
       {
         label: "Order value (excl. cancelled)",
-        value: round2(rows.filter((r) => r.status !== "CANCELLED").reduce((s, r) => s + r.total, 0)),
+        value: round2(orders.filter((o) => o.status !== "CANCELLED").reduce((s, o) => s + orderTotal(o), 0)),
         type: "money",
       },
-      { label: "Pending", value: count("PENDING"), type: "number" },
       { label: "Confirmed", value: count("CONFIRMED"), type: "number" },
       { label: "Shipped", value: count("SHIPPED"), type: "number" },
       { label: "Delivered", value: count("DELIVERED"), type: "number" },
@@ -181,7 +212,7 @@ const ordersReport = (mode) => async (ctx) => {
   }
 
   return {
-    title: mode === "pending" ? "Pending Orders Report" : "Orders Report",
+    title: mode === "pending" ? "Open Orders Report" : "Orders Report",
     columns,
     rows,
     summary,
