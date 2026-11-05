@@ -43,7 +43,7 @@ router.get(
   authorize("STORE"),
   allProductWithStore,
 );
-router.delete("/delete-product/:id", deleteProduct);
+router.delete("/delete-product/:id", verifyJwt, authorize("STORE"), deleteProduct);
 router.patch("/verify-status/:id", verifyJwt, authorize("STORE"), verifyStatus);
 
 // ---------- STOREFRONT (public, by storeUniqueId) ----------

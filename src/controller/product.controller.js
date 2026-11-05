@@ -406,14 +406,18 @@ const createProduct = async (req, res) => {
     const store = await StoreModel.findById(parsedData.storeId);
     if (!store) return sendStoreUnavailable(res);
 
+    // [CAT TYPE] category oi store er hote hobe AND product type er sathe type mile jete hobe
+    const itemType = parsedData.productType || "PRODUCT";
     const category = await CategoryModel.findOne({
       _id: parsedData.categoryId,
       storeId: parsedData.storeId,
+      type: itemType,
     });
     if (!category) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Category not found for this store" });
+      return res.status(404).json({
+        success: false,
+        message: `Selected category is not a valid ${itemType.toLowerCase()} category for this store`,
+      });
     }
 
     // ---------- Same store-e same name-er product age theke ache kina check ----------
@@ -853,15 +857,26 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    if (parsedData.categoryId) {
+    // [CAT TYPE] category type shobshomoy product type er sathe mile jete hobe
+    // (sudhu type change holeo existing category ta abar check hobe)
+    const targetType =
+      parsedData.productType || existingProduct.productType || "PRODUCT";
+    const typeChanged =
+      targetType !== (existingProduct.productType || "PRODUCT");
+    const categoryToCheck =
+      parsedData.categoryId ||
+      (typeChanged ? existingProduct.categoryId : null);
+
+    if (categoryToCheck) {
       const category = await CategoryModel.findOne({
-        _id: parsedData.categoryId,
+        _id: categoryToCheck,
         storeId: existingProduct.storeId,
+        type: targetType,
       });
       if (!category) {
         return res.status(404).json({
           success: false,
-          message: "Category not found for this store",
+          message: `Selected category is not a valid ${targetType.toLowerCase()} category for this store`,
         });
       }
     }
@@ -1184,11 +1199,16 @@ const updateProduct = async (req, res) => {
 const deleteProduct = async (req, res) => {
   try {
     const { id } = req.params;
-    const product = await ProductModel.findById(id);
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: "Invalid product id" });
+    }
+    const userId = req.user?._id || req.user?.id;
+
+    // [SECURITY] shudhu nijer product delete korte parbe
+    const product = await ProductModel.findOneAndDelete({ _id: id, userId });
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
-    await ProductModel.findByIdAndDelete(id);
     return res.status(200).json({ message: "Product deleted permanently" });
   } catch (error) {
     console.error("Delete Product Error:", error);
@@ -1736,6 +1756,17 @@ const getStoreCategories = async (req, res) => {
 
     const match = { storeId: store._id, isActive: true };
 
+    // [CAT TYPE] optional ?type=PRODUCT|SERVICE
+    const type = String(req.query.type || "").trim().toUpperCase();
+    if (type) {
+      if (!["PRODUCT", "SERVICE"].includes(type)) {
+        return res
+          .status(400)
+          .json({ success: false, message: "type must be PRODUCT or SERVICE" });
+      }
+      match.type = type;
+    }
+
     const search = (req.query.search || "").trim();
     if (search) {
       match.name = { $regex: escapeRegex(search), $options: "i" };
@@ -1770,6 +1801,7 @@ const getStoreCategories = async (req, res) => {
       {
         $project: {
           name: 1,
+          type: 1, // [CAT TYPE]
           description: 1,
           image: 1,
           icon: 1,

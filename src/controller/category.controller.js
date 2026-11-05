@@ -6,6 +6,8 @@ const {
   getAvailableStoreIds,
   sendStoreUnavailable,
 } = require("../helper/storeAvailability.js");
+const ProductModel = require("../model/product.model.js");
+const { CATEGORY_TYPES } = require("../model/category.model.js");
 
 const uploadCategoryImage = async (files = []) => {
   const file = files.find((f) => f.fieldname.startsWith("image"));
@@ -20,6 +22,8 @@ const parseBoolean = (value) => {
   return value === true || value === "true";
 };
 
+const normalizeType = (value) => String(value || "").trim().toUpperCase();
+
 const createCategory = async (req, res) => {
   try {
     if (req.user?.role !== "STORE") {
@@ -28,15 +32,28 @@ const createCategory = async (req, res) => {
       });
     }
     const { name, description, storeId, icon } = req.body;
+    const type = normalizeType(req.body.type) || "PRODUCT";
+
     if (!name?.trim() || !storeId) {
       return res.status(400).json({ message: "Name and storeId are required" });
     }
-    const exists = await CategoryModel.findOne({ name: name.trim(), storeId });
-    if (exists) {
+    if (!CATEGORY_TYPES.includes(type)) {
       return res
         .status(400)
-        .json({ message: "Category already exists for this store" });
+        .json({ message: "Category type must be PRODUCT or SERVICE" });
     }
+
+    const exists = await CategoryModel.findOne({
+      name: name.trim(),
+      storeId,
+      type,
+    });
+    if (exists) {
+      return res.status(400).json({
+        message: `${type === "SERVICE" ? "Service" : "Product"} category already exists for this store`,
+      });
+    }
+
     const image = (await uploadCategoryImage(req.files)) || "";
     const category = await CategoryModel.create({
       name: name.trim(),
@@ -44,6 +61,7 @@ const createCategory = async (req, res) => {
       icon: icon?.trim() || "",
       image,
       storeId,
+      type,
     });
     return res.status(201).json({
       message: "Category created successfully",
@@ -66,6 +84,16 @@ const allCategories = async (req, res) => {
   try {
     const { storeId } = req.query;
     const filter = {};
+
+    if (req.query.type) {
+      const type = normalizeType(req.query.type);
+      if (!CATEGORY_TYPES.includes(type)) {
+        return res
+          .status(400)
+          .json({ message: "type must be PRODUCT or SERVICE" });
+      }
+      filter.type = type;
+    }
 
     if (storeId) {
       if (!mongoose.isValidObjectId(storeId)) {
@@ -140,6 +168,10 @@ const updateCategory = async (req, res) => {
 
     const { categoryId } = req.params;
 
+    if (!mongoose.isValidObjectId(categoryId)) {
+      return res.status(400).json({ message: "Invalid category id" });
+    }
+
     const category = await CategoryModel.findById(categoryId);
 
     if (!category) {
@@ -150,10 +182,21 @@ const updateCategory = async (req, res) => {
 
     const { name, description, icon, isActive, removeImage } = req.body;
 
+    // type is fixed after creation (products already depend on it)
+    if (
+      req.body.type !== undefined &&
+      normalizeType(req.body.type) !== category.type
+    ) {
+      return res.status(400).json({
+        message: "Category type cannot be changed after it is created",
+      });
+    }
+
     if (name?.trim()) {
       const exists = await CategoryModel.findOne({
         _id: { $ne: categoryId },
         storeId: category.storeId,
+        type: category.type,
         name: name.trim(),
       });
 
@@ -198,7 +241,6 @@ const updateCategory = async (req, res) => {
   }
 };
 
-// DELETE CATEGORY
 
 const deleteCategory = async (req, res) => {
   try {
@@ -209,6 +251,18 @@ const deleteCategory = async (req, res) => {
     }
 
     const { categoryId } = req.params;
+
+    if (!mongoose.isValidObjectId(categoryId)) {
+      return res.status(400).json({ message: "Invalid category id" });
+    }
+
+    // don't leave products pointing to a deleted category
+    const inUse = await ProductModel.countDocuments({ categoryId });
+    if (inUse > 0) {
+      return res.status(400).json({
+        message: `Cannot delete: ${inUse} item(s) are using this category`,
+      });
+    }
 
     await CategoryModel.findByIdAndDelete(categoryId);
 
