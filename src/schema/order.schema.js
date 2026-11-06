@@ -151,13 +151,6 @@ const createRequestSchema = z
         message: "Please write your reason",
       });
     }
-    if (d.type === "REFUND" && !d.bankDetails) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["bankDetails"],
-        message: "Bank details or a UPI ID is required to receive your refund",
-      });
-    }
   });
 
 const decideRequestSchema = z

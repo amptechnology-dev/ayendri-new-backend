@@ -10,9 +10,15 @@ const {
 } = require("../schema/order.schema.js");
 const {
   checkRequestEligibility,
-  itemRefundAmount,
+  requestRefundAmount,
   resolveReasonText,
 } = require("../helper/orderRefund.js");
+const {
+  isAvailable: isShiprocketAvailable,
+  createReturnOrder,
+} = require("../helper/shiprocket.js");
+
+const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
 const getUserId = (req) => req.user?._id || req.user?.id;
 
@@ -60,6 +66,114 @@ const getRole = async (req) => {
   return user?.role || null;
 };
 
+const ymd = (d) => new Date(d).toISOString().slice(0, 10);
+const last10 = (p) => String(p || "").replace(/\D/g, "").slice(-10);
+const splitName = (full) => {
+  const parts = String(full || "Customer").trim().split(/\s+/);
+  return { first: parts[0], last: parts.slice(1).join(" ") || "." };
+};
+
+// Approved RETURN er jonno Shiprocket e return pickup toiri kore.
+// Kono karone na hole error ferot dey na, request e note rekhe store ke manually korte dey.
+const startReturnPickup = async (request) => {
+  try {
+    const order = await OrderModel.findById(request.orderId)
+      .select("+pickupAddress")
+      .lean();
+    if (!order) return { status: "MANUAL", note: "Order not found" };
+
+    // courier diye ashe nai (LOCAL / own delivery), tai courier return lagbe na
+    if (!order.shipment?.awb) {
+      return { status: "MANUAL", note: "Not shipped via courier" };
+    }
+    if (!isShiprocketAvailable()) {
+      return { status: "FAILED", note: "Shiprocket is currently unavailable" };
+    }
+
+    const store = order.pickupAddress;
+    if (!store?.pincode || !store?.addressLine) {
+      return {
+        status: "MANUAL",
+        note: "Store pickup address is missing, arrange return manually",
+      };
+    }
+
+    const item = (order.items || []).find(
+      (i) => String(i._id) === String(request.itemId),
+    );
+    if (!item) return { status: "FAILED", note: "Item not found" };
+
+    const customer = await UserModel.findById(order.userId)
+      .select("email")
+      .lean();
+    const d = order.deliveryAddress;
+    const cust = splitName(d.fullName);
+    const owner = splitName(store.contactName);
+
+    const pItem = (order.parcel?.items || []).find(
+      (p) => String(p.productId) === String(item.productId),
+    );
+    const unitPrice = Number(item.offerPrice ?? 0);
+
+    const payload = {
+      order_id: request.requestNumber,
+      order_date: ymd(new Date()),
+      // customer = pickup (jar kach theke product ashbe)
+      pickup_customer_name: cust.first,
+      pickup_last_name: cust.last,
+      pickup_address: d.addressLine,
+      pickup_address_2: d.area || "",
+      pickup_city: d.city,
+      pickup_state: d.state,
+      pickup_country: d.country || "India",
+      pickup_pincode: d.pincode,
+      pickup_email: customer?.email || store.email || "noemail@example.com",
+      pickup_phone: last10(d.phone),
+      pickup_isd_code: "91",
+      // store = shipping (jekhane product ferot jabe)
+      shipping_customer_name: owner.first,
+      shipping_last_name: owner.last,
+      shipping_address: store.addressLine,
+      shipping_address_2: store.area || "",
+      shipping_city: store.city,
+      shipping_state: store.state,
+      shipping_country: store.country || "India",
+      shipping_pincode: store.pincode,
+      shipping_email: store.email || "noemail@example.com",
+      shipping_phone: last10(store.phone),
+      shipping_isd_code: "91",
+      order_items: [
+        {
+          name: item.name,
+          sku: item.productCode || String(item.productId),
+          units: item.quantity,
+          selling_price: unitPrice,
+          discount: 0,
+          hsn: item.hsnCode || "",
+        },
+      ],
+      payment_method: "PREPAID",
+      total_discount: 0,
+      sub_total: round2(unitPrice * item.quantity),
+      length: order.parcel?.length || 10,
+      breadth: order.parcel?.breadth || 10,
+      height: order.parcel?.height || 10,
+      weight: pItem?.lineWeightKg || order.parcel?.weight || 0.5,
+    };
+
+    const data = await createReturnOrder(payload);
+    return {
+      status: "CREATED",
+      shiprocketOrderId: data?.order_id ?? null,
+      shipmentId: data?.shipment_id ?? null,
+      createdAt: new Date(),
+    };
+  } catch (err) {
+    console.error("Return pickup error:", err.message);
+    return { status: "FAILED", note: err.message };
+  }
+};
+
 const createOrderRequest = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -93,6 +207,24 @@ const createOrderRequest = async (req, res) => {
       return res.status(400).json({ success: false, message: check.message });
     }
 
+    // [FIX] RETURN ar REFUND dutote user er deya taka ferot jabe. REPLACE e jabe na
+    const refundAmount = requestRefundAmount(order, item, type);
+    const moneyBack = refundAmount > 0;
+
+    if (moneyBack && !bankDetails) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: [
+          {
+            field: "bankDetails",
+            message:
+              "Bank details or a UPI ID is required to receive your refund",
+          },
+        ],
+      });
+    }
+
     // ek item e ekta-i active / completed request
     const duplicate = await OrderRequestModel.exists({
       orderId: order._id,
@@ -104,6 +236,17 @@ const createOrderRequest = async (req, res) => {
         success: false,
         message: "A request for this item already exists",
       });
+    }
+
+    // [GUARD] ager refund soho order e jototuku paid, tar beshi ferot hobe na
+    if (moneyBack) {
+      const refundableTotal = order.itemsTotal ?? order.totalAmount;
+      if (Number(order.refundedAmount || 0) + refundAmount > refundableTotal + 0.005) {
+        return res.status(400).json({
+          success: false,
+          message: "Refund amount exceeds the paid amount of this order",
+        });
+      }
     }
 
     const request = await OrderRequestModel.create({
@@ -119,8 +262,8 @@ const createOrderRequest = async (req, res) => {
       source: "CUSTOMER",
       reasonCode,
       reason: resolveReasonText(reasonCode, reason),
-      refundAmount: type === "REFUND" ? itemRefundAmount(item) : 0,
-      bankDetails: type === "REFUND" ? bankDetails : null,
+      refundAmount,
+      bankDetails: moneyBack ? bankDetails : null,
     });
 
     return res.status(201).json({
@@ -132,7 +275,6 @@ const createOrderRequest = async (req, res) => {
       },
     });
   } catch (error) {
-    // unique index e atkale (duto request ekshathe ashle)
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
@@ -261,8 +403,6 @@ const getStoreRequests = async (req, res) => {
   }
 };
 
-// ===================== STORE: APPROVE / REJECT =====================
-// PATCH /api/order/store-requests/:requestId/decision   body: { action, note? }
 const decideRequest = async (req, res) => {
   try {
     const { requestId } = req.params;
@@ -294,7 +434,7 @@ const decideRequest = async (req, res) => {
       });
     }
 
-    const request = await OrderRequestModel.findOneAndUpdate(
+    let request = await OrderRequestModel.findOneAndUpdate(
       { _id: requestId, status: "REQUESTED" },
       {
         $set: {
@@ -314,9 +454,27 @@ const decideRequest = async (req, res) => {
       });
     }
 
+    // [RETURN] approve hole courier return pickup toiri
+    let returnShipment = null;
+    if (action === "APPROVE" && request.type === "RETURN") {
+      returnShipment = await startReturnPickup(request);
+      request = await OrderRequestModel.findByIdAndUpdate(
+        requestId,
+        { $set: { returnShipment } },
+        { new: true },
+      ).lean();
+    }
+
     return res.status(200).json({
       success: true,
-      message: action === "APPROVE" ? "Request approved" : "Request rejected",
+      message:
+        action === "APPROVE"
+          ? returnShipment?.status === "CREATED"
+            ? "Request approved and courier return pickup created"
+            : returnShipment
+              ? `Request approved. Courier return was not created (${returnShipment.note}). Arrange the return manually`
+              : "Request approved"
+          : "Request rejected",
       request,
     });
   } catch (error) {
@@ -354,7 +512,9 @@ const completeRequest = async (req, res) => {
         message: "Only an approved request can be completed",
       });
     }
-    if (existing.type === "REFUND" && !referenceNo) {
+
+    const paysMoney = Number(existing.refundAmount) > 0; // [FIX] REFUND + RETURN
+    if (paysMoney && !referenceNo) {
       return res.status(400).json({
         success: false,
         message: "Validation failed",
@@ -387,7 +547,7 @@ const completeRequest = async (req, res) => {
       });
     }
 
-    if (request.type === "REFUND" && request.refundAmount > 0) {
+    if (Number(request.refundAmount) > 0) {
       const order = await OrderModel.findByIdAndUpdate(
         request.orderId,
         { $inc: { refundedAmount: request.refundAmount } },
@@ -410,7 +570,7 @@ const completeRequest = async (req, res) => {
     return res.status(200).json({
       success: true,
       message:
-        request.type === "REFUND"
+        Number(request.refundAmount) > 0
           ? "Refund marked as paid"
           : "Request marked as completed",
       request,

@@ -8,16 +8,15 @@ const {
   notifyLowStock,
 } = require("../helper/stockManager.js");
 
-// ---------- GET /api/stock/overview ----------
-// One row per stock-unit (simple product / flat variant / color / sizeVariant)
-// Full details soho: product image, name, code, ar variant-er প্রতিটা attribute
-// (color, size, weight, height) alada "meta" object-e — frontend chip banate parবে.
 const getStockOverview = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
     const { search = "", lowStockOnly, page = 1, limit = 20 } = req.query;
 
-    const match = { userId: new mongoose.Types.ObjectId(userId) };
+    const match = {
+      userId: new mongoose.Types.ObjectId(userId),
+      productType: { $ne: "SERVICE" }, // [CHANGE] service hide
+    };
     if (search) {
       match.$or = [
         { name: { $regex: search, $options: "i" } },
@@ -71,9 +70,6 @@ const getStockOverview = async (req, res) => {
   }
 };
 
-// ---------- PATCH /api/stock/update ----------
-// body: { productId, variantId?, sizeVariantId?, type: "ADD"|"REDUCE", quantity, note? }
-// NOTE: "SET" option remove kora holo — sudhu ADD / REDUCE lagবে.
 const updateStock = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
@@ -90,7 +86,12 @@ const updateStock = async (req, res) => {
       return res.status(400).json({ success: false, message: "quantity must be a number greater than 0" });
     }
 
-    const product = await ProductModel.findOne({ _id: productId, userId });
+    // [CHANGE] service product er stock update kora jabe na
+    const product = await ProductModel.findOne({
+      _id: productId,
+      userId,
+      productType: { $ne: "SERVICE" },
+    });
     if (!product) {
       return res.status(404).json({ success: false, message: "Product not found" });
     }
@@ -134,7 +135,6 @@ const updateStock = async (req, res) => {
       logType = "IN";
       reason = "MANUAL_ADD";
     } else {
-      // REDUCE
       newStock = Math.max(0, previousStock - qty);
       logType = "OUT";
       reason = "MANUAL_REDUCE";
@@ -199,11 +199,15 @@ const getStockLogs = async (req, res) => {
   }
 };
 
-// ---------- GET /api/stock/low-stock ----------
 const getLowStockProducts = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
-    const products = await ProductModel.find({ userId, hasLowStock: true })
+    // [CHANGE] service hide
+    const products = await ProductModel.find({
+      userId,
+      hasLowStock: true,
+      productType: { $ne: "SERVICE" },
+    })
       .select("name productCode images variants currentStock lowStockThreshold unit")
       .lean();
 

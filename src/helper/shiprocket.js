@@ -157,12 +157,14 @@ const etaDaysOf = (c) => {
     if (Number.isFinite(t))
       return Math.max(0, Math.ceil((t - Date.now()) / 86400000));
   }
-  return null; 
+  return null;
 };
 
 const modeOf = (c) => {
   if (c.is_surface === undefined || c.is_surface === null) return null;
-  return c.is_surface === true || Number(c.is_surface) === 1 ? "SURFACE" : "AIR";
+  return c.is_surface === true || Number(c.is_surface) === 1
+    ? "SURFACE"
+    : "AIR";
 };
 
 const normalizeServiceability = (data, cod) => {
@@ -177,9 +179,9 @@ const normalizeServiceability = (data, cod) => {
       etd: c.etd || null,
       cod: Number(c.cod) === 1,
       rating: Number(c.rating) || null,
-      mode: modeOf(c), 
+      mode: modeOf(c),
     }))
-    .filter((c) => Number.isFinite(c.rate)); 
+    .filter((c) => Number.isFinite(c.rate));
 
   if (cod && list.some((c) => c.cod !== undefined)) {
     couriers = couriers.filter((c) => c.cod);
@@ -420,7 +422,7 @@ const generatePickup = (shipmentId) =>
     body: { shipment_id: [shipmentId] },
   });
 
-  const cancelShipment = async ({ awb, shiprocketOrderId }) => {
+const cancelShipment = async ({ awb, shiprocketOrderId }) => {
   if (!isConfigured()) {
     throw new ShiprocketError("Courier service is not configured");
   }
@@ -439,6 +441,10 @@ const generatePickup = (shipmentId) =>
     }
   }
 };
+
+// [RETURN] delivered order er item customer er kach theke store e ferot ani
+const createReturnOrder = (payload) =>
+  request("POST", "/orders/create/return", { body: payload });
 
 // ---------- parcel weight / size (product packagingDetails theke) ----------
 const num = (v) => {
@@ -576,6 +582,8 @@ module.exports = {
   generatePickup,
   listPickupLocations,
   addPickupLocation,
+  cancelShipment, 
+  createReturnOrder, 
   calcWeightKg,
   buildParcel,
 };

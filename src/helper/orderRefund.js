@@ -35,6 +35,12 @@ const withinDays = (from, days) =>
 const itemRefundAmount = (item) =>
   round2(item.lineTotalWithGst ?? item.lineTotal ?? 0);
 
+const requestRefundAmount = (order, item, type) => {
+  if (type !== "RETURN" && type !== "REFUND") return 0;
+  if (order.paymentStatus !== "PAID") return 0;
+  return itemRefundAmount(item);
+};
+
 // paid order cancel korle refund pawa jabe kina
 const checkCancelRefund = (order) => {
   const items = order.items || [];
@@ -121,6 +127,7 @@ module.exports = {
   round2,
   resolveReasonText,
   itemRefundAmount,
+  requestRefundAmount, 
   checkCancelRefund,
   checkRequestEligibility,
 };

@@ -232,11 +232,23 @@ const productSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-productSchema.pre("save", async function () {
-  if (this.isNew && !this.productCode) {
-    const seq = await getNextSequence("productCode");
-    this.productCode = `PRD${String(seq).padStart(6, "0")}`;
-  }
+const zeroStock = (o) => {
+  o.openingStock = 0;
+  o.currentStock = 0;
+  o.lowStockThreshold = 0;
+};
+
+productSchema.pre("save", function () {
+  if (this.productType !== "SERVICE") return;
+
+  this.hasStockManagement = false;
+  this.hasLowStock = false;
+  zeroStock(this);
+
+  (this.variants || []).forEach((v) => {
+    zeroStock(v);
+    (v.sizeVariants || []).forEach(zeroStock);
+  });
 });
 
 const ProductModel = mongoose.model("Product", productSchema);

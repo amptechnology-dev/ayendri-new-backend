@@ -56,6 +56,7 @@ const orderRequestSchema = new mongoose.Schema(
 
     refundAmount: { type: Number, default: 0, min: 0 },
     bankDetails: { type: bankDetailsSchema, default: null },
+    returnShipment: { type: mongoose.Schema.Types.Mixed, default: null },
 
     storeNote: { type: String, default: null },
     decidedAt: { type: Date, default: null },

@@ -55,7 +55,10 @@ const setStoreBusinessType = (storeId, type) =>
 
 // Sudhu explicit `true` hole-i stock managed.
 // false / undefined / null shob OFF -> stock check, decrement, out-of-stock kichu hobe na.
-const isStockManaged = (product) => product?.hasStockManagement === true;
+const isStockManaged = (product) => {
+  if (product?.productType === "SERVICE") return false;
+  product?.hasStockManagement === true;
+};
 
 module.exports = {
   DEFAULT_SETTINGS,

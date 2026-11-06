@@ -75,15 +75,24 @@ const { cancelShipment } = require("../helper/shiprocket.js");
 const { startFulfilment } = require("../helper/fulfilment.js");
 
 // ===================== CONSTANTS / HELPERS =====================
-const ORDER_STATUSES = ["CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+const ORDER_STATUSES = [
+  "PENDING",
+  "CONFIRMED",
+  "SHIPPED",
+  "DELIVERED",
+  "CANCELLED",
+];
 
 // SHIPPED sudhu Shiprocket webhook theke hoy
 const ALLOWED_TRANSITIONS = {
+  PENDING: ["CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"], // purono order er jonno
   CONFIRMED: ["SHIPPED", "DELIVERED", "CANCELLED"],
   SHIPPED: ["DELIVERED"],
   DELIVERED: [],
   CANCELLED: [],
 };
+
+const allowedFrom = (status) => ALLOWED_TRANSITIONS[status] || [];
 
 const STORE_MANUAL_STATUSES = ["DELIVERED", "CANCELLED"];
 
@@ -148,8 +157,6 @@ const getOwnedStoreIds = async (userId) => {
 const isStoreOwner = async (storeId, userId) =>
   !!(await StoreModel.exists({ _id: storeId, userId }));
 
-// Atomic status change: sudhu valid "from" status thakle-i update hoy.
-// Concurrent request e ekta-i jitbe, tai stock double restore hobe na.
 const transitionOrder = async ({
   orderId,
   filter = {},
@@ -160,7 +167,7 @@ const transitionOrder = async ({
   populateUser = false,
 }) => {
   const validFrom = ORDER_STATUSES.filter((s) =>
-    ALLOWED_TRANSITIONS[s].includes(status),
+    allowedFrom(s).includes(status),
   );
 
   let query = OrderModel.findOneAndUpdate(
@@ -214,6 +221,20 @@ const cancelCourier = async (order) => {
   } catch (err) {
     return err.message || "Courier shipment could not be cancelled";
   }
+};
+
+const checkCancelRefundByType = (order) => {
+  if (order.hasService) return checkCancelRefund(order);
+
+  const items = order.items || [];
+  if (!items.every((i) => i.isRefundable)) {
+    return {
+      ok: false,
+      message:
+        "This order has items that are not refundable, so it cannot be cancelled after payment",
+    };
+  }
+  return { ok: true };
 };
 
 // ===================== [BOOKING LIMIT] =====================
@@ -907,7 +928,7 @@ const restoreOrderStock = async (order, userId) => {
   await Promise.all(
     order.items.map(async (item) => {
       const product = await ProductModel.findById(item.productId).select(
-        "variants currentStock lowStockThreshold hasStockManagement",
+        "variants currentStock lowStockThreshold hasStockManagement productType", // [CHANGE]
       );
       if (!product || !isStockManaged(product)) return;
 
@@ -1300,17 +1321,17 @@ const cancelMyOrder = async (req, res) => {
         .json({ success: false, message: "Order not found" });
     }
 
-    if (!ALLOWED_TRANSITIONS[existing.status].includes("CANCELLED")) {
+    if (!allowedFrom(existing.status).includes("CANCELLED")) {
       return res.status(400).json({
         success: false,
         message: `Order cannot be cancelled once it is ${existing.status}`,
       });
     }
 
-    // [REFUND] paid order: sob item refundable + (service hole) booking date er age hole-i cancel + refund
+    // [REFUND] paid order: booking date rule shudhu SERVICE e, PRODUCT e na
     const wasPaid = existing.paymentStatus === "PAID";
     if (wasPaid) {
-      const check = checkCancelRefund(existing);
+      const check = checkCancelRefundByType(existing); // [CHANGE]
       if (!check.ok) {
         return res.status(400).json({ success: false, message: check.message });
       }
@@ -1337,8 +1358,6 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // atomic claim: ekta request-i jitbe, tai stock ekbar-i restore hobe.
-    // paymentStatus filter e race guard (ei majhe payment status bodle gele cancel hobe na)
     const order = await transitionOrder({
       orderId,
       filter: {
@@ -1358,7 +1377,6 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // [REFUND] paid order cancel hole refund request auto approved, store taka pathiye complete korbe
     let refundRequest = null;
     if (wasPaid) {
       refundRequest = await OrderRequestModel.create({
@@ -1423,7 +1441,7 @@ const respondToQuote = async (req, res) => {
     }
 
     if (
-      existing.status !== "CONFIRMED" ||      // PENDING chhilo
+      existing.status !== "CONFIRMED" || // PENDING chhilo
       existing.priceStatus !== "QUOTED" ||
       !existing.quote
     ) {
@@ -1534,9 +1552,9 @@ const respondToQuote = async (req, res) => {
     }
 
     notifyStorePriceResponse(order, action === "ACCEPT");
-     if (action === "ACCEPT") {
+    if (action === "ACCEPT") {
       notifyInvoice(order);
-      kickOffShipment(order); 
+      kickOffShipment(order);
     }
 
     return res.status(200).json({
@@ -1700,11 +1718,11 @@ const updateOrderStatus = async (req, res) => {
       });
     }
 
-    if (!ALLOWED_TRANSITIONS[existing.status].includes(status)) {
+    if (!allowedFrom(existing.status).includes(status)) {
       return res.status(400).json({
         success: false,
         message:
-          ALLOWED_TRANSITIONS[existing.status].length === 0
+          allowedFrom(existing.status).length === 0
             ? `Order status cannot be changed once it is ${existing.status}`
             : `Cannot change status from ${existing.status} to ${status}`,
       });
@@ -1799,7 +1817,7 @@ const updateOrderStatus = async (req, res) => {
       status,
       note,
       userId,
-      extra: { cancelReason: reason, cancelledBy: "USER", autoShip: false },
+      extra: { ...extra, autoShip: false },
       populateUser: true, // frontend merge e customer jeno na hariye jay
     });
 
