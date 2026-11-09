@@ -25,6 +25,10 @@ const { hasPrice } = require("../helper/priceQuote.js");
 // [GST]
 const { getGstMode, calcLineGst } = require("../helper/gst.js");
 const BookingSlotModel = require("../model/bookingSlot.model.js");
+const {
+  earliestBookingYmd,
+  BOOKING_CUTOFF_LABEL,
+} = require("../helper/orderRefund.js");
 
 // ===================== HELPERS =====================
 
@@ -43,7 +47,6 @@ const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const todayIST = () =>
   new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 
-// faka -> { value: null }, thik hole { value: "YYYY-MM-DD" }, noile { error }
 const parseBookingDate = (raw) => {
   if (raw === undefined || raw === null || String(raw).trim() === "") {
     return { value: null };
@@ -54,9 +57,14 @@ const parseBookingDate = (raw) => {
     !Number.isNaN(Date.parse(`${s}T00:00:00.000Z`)) &&
     new Date(`${s}T00:00:00.000Z`).toISOString().slice(0, 10) === s;
   if (!valid) return { error: "Invalid booking date" };
-  if (s <= todayIST()) {
+
+  const earliest = earliestBookingYmd();
+  if (s < earliest) {
     return {
-      error: "Same-day booking isn't available. Please pick a later date",
+      error:
+        s < todayIST()
+          ? "Booking date cannot be in the past"
+          : `Booking for today closes at ${BOOKING_CUTOFF_LABEL}. Please choose ${earliest} or a later date`,
     };
   }
   return { value: s };
@@ -320,7 +328,10 @@ const serializeCart = async (
       bookingDate: item.bookingDate ?? null,
       bookingDateExpired:
         isServiceProduct(liveProduct) &&
-        (!item.bookingDate || item.bookingDate <= todayIST()),
+        (!item.bookingDate || item.bookingDate < earliestBookingYmd()),
+      earliestBookingDate: isServiceProduct(liveProduct)
+        ? earliestBookingYmd()
+        : null,
     });
   }
 
@@ -552,7 +563,8 @@ const updateCartItem = async (req, res) => {
         if (bd.error || !bd.value) {
           return res.status(400).json({
             success: false,
-            message: bd.error || "Please select a booking date for this service",
+            message:
+              bd.error || "Please select a booking date for this service",
             errors: [
               {
                 field: "bookingDate",

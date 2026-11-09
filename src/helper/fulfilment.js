@@ -26,6 +26,29 @@ const fmtOrderDate = (d) =>
     .slice(0, 16)
     .replace("T", " ");
 
+// order ei majhe cancel / change hoye gele true
+const isStillConfirmed = async (orderId) => {
+  const fresh = await OrderModel.findById(orderId).select("status").lean();
+  return fresh?.status === "CONFIRMED";
+};
+
+// job cholar majhe order cancel hoye gele jototuku courier e toiri hoyeche seta cancel kore
+const abortIfCancelled = async (orderId, shipment) => {
+  if (shipment?.awb || shipment?.shiprocketOrderId) {
+    await shiprocket
+      .cancelShipment({
+        awb: shipment.awb,
+        shiprocketOrderId: shipment.shiprocketOrderId,
+      })
+      .catch((e) => console.error("Late courier cancel failed:", e.message));
+  }
+  await OrderModel.updateOne(
+    { _id: orderId },
+    { $set: { shipLockUntil: null, shipError: null } },
+  );
+  return { started: false, cancelled: true };
+};
+
 // shipment shuru korar shob shortho mille-i ei filter match kore
 const dueFilter = (now = new Date()) => ({
   status: "CONFIRMED",
@@ -77,6 +100,10 @@ const startFulfilment = async (orderId) => {
 
     // ---------- Step A: Shiprocket e order create ----------
     if (!shipment?.shipmentId) {
+      if (!(await isStillConfirmed(order._id))) {
+        return await abortIfCancelled(order._id, shipment);
+      }
+
       let parcel = order.parcel?.weight ? order.parcel : null;
       const productIds = [
         ...new Set(order.items.map((i) => String(i.productId))),
@@ -190,9 +217,18 @@ const startFulfilment = async (orderId) => {
 
     // ---------- Step B: AWB assign ----------
     if (!shipment.awb) {
+      // AWB assign e courier wallet theke taka kate, tai age cancel check
+      if (!(await isStillConfirmed(order._id))) {
+        return await abortIfCancelled(order._id, shipment);
+      }
+
       const extract = (r) => {
         const d = r?.response?.data || {};
-        return { awb: d.awb_code || r?.awb_code, data: d, message: d.message || r?.message };
+        return {
+          awb: d.awb_code || r?.awb_code,
+          data: d,
+          message: d.message || r?.message,
+        };
       };
 
       let awbRes = await shiprocket
@@ -208,14 +244,17 @@ const startFulfilment = async (orderId) => {
       let switched = false;
 
       if (!ex.awb && shipment.courierId) {
-        awbRes = await shiprocket.assignAwb({ shipmentId: shipment.shipmentId });
+        awbRes = await shiprocket.assignAwb({
+          shipmentId: shipment.shipmentId,
+        });
         ex = extract(awbRes);
         switched = true;
       }
 
       if (!ex.awb) {
         throw new Error(
-          ex.message || "AWB could not be assigned. Check the courier wallet balance",
+          ex.message ||
+            "AWB could not be assigned. Check the courier wallet balance",
         );
       }
 
@@ -228,7 +267,8 @@ const startFulfilment = async (orderId) => {
         appliedWeight: Number(ex.data.applied_weight) || null,
         assignedAt: parseDate(ex.data.assigned_date_time) || new Date(),
         pickupScheduledDate:
-          parseDate(ex.data.pickup_scheduled_date) || shipment.pickupScheduledDate,
+          parseDate(ex.data.pickup_scheduled_date) ||
+          shipment.pickupScheduledDate,
         courierSwitched: switched,
         status: "AWB_ASSIGNED",
       };
@@ -248,7 +288,9 @@ const startFulfilment = async (orderId) => {
           pickupScheduledDate:
             parseDate(p.pickup_scheduled_date) || shipment.pickupScheduledDate,
           pickupTokenNumber:
-            p.pickup_token_number != null ? String(p.pickup_token_number) : null,
+            p.pickup_token_number != null
+              ? String(p.pickup_token_number)
+              : null,
           status: "PICKUP_SCHEDULED",
         };
         pickupJustRequested = true;
@@ -275,15 +317,9 @@ const startFulfilment = async (orderId) => {
       },
     );
 
-    // ei majhe order cancel hoye gele courier shipment o cancel
     const fresh = await OrderModel.findById(order._id).select("status").lean();
     if (fresh?.status === "CANCELLED") {
-      await shiprocket
-        .cancelShipment({
-          awb: shipment.awb,
-          shiprocketOrderId: shipment.shiprocketOrderId,
-        })
-        .catch((e) => console.error("Late courier cancel failed:", e.message));
+      return await abortIfCancelled(order._id, shipment);
     }
 
     if (pickupJustRequested && order.pickupAddress?.email) {
@@ -300,7 +336,12 @@ const startFulfilment = async (orderId) => {
     const wait = Math.min(order.shipTries || 1, 12) * 10 * 60000;
     await OrderModel.updateOne(
       { _id: order._id },
-      { $set: { shipError: err.message, shipLockUntil: new Date(Date.now() + wait) } },
+      {
+        $set: {
+          shipError: err.message,
+          shipLockUntil: new Date(Date.now() + wait),
+        },
+      },
     );
     console.error(`Auto shipment failed (${order.orderNumber}):`, err.message);
     return { started: false, error: err.message };

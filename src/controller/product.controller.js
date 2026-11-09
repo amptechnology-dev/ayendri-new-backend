@@ -57,6 +57,11 @@ const {
 } = require("../helper/productPolicy.js");
 const { sendPickupContactProductMail } = require("../helper/pickupMail.js");
 const BookingSlotModel = require("../model/bookingSlot.model.js");
+const {
+  earliestBookingYmd,
+  isPastBookingCutoff,
+  BOOKING_CUTOFF_LABEL,
+} = require("../helper/orderRefund.js");
 
 const policyErrorResponse = (res, error) =>
   res.status(400).json({
@@ -2143,24 +2148,28 @@ const getBookingAvailability = async (req, res) => {
         .json({ success: false, message: "Service not found" });
     }
 
+    // [BOOKING] 4 PM er por aj er booking bondho, kal theke
+    const earliest = earliestBookingYmd();
+    const cutoff = {
+      earliestBookingDate: earliest,
+      todayClosed: isPastBookingCutoff(),
+      cutoffLabel: BOOKING_CUTOFF_LABEL,
+    };
+
     const limit = product.dailyBookingLimit;
     if (!limit) {
-      return res
-        .status(200)
-        .json({
-          success: true,
-          limited: false,
-          dailyBookingLimit: null,
-          days: [],
-        });
+      return res.status(200).json({
+        success: true,
+        limited: false,
+        dailyBookingLimit: null,
+        days: [],
+        ...cutoff,
+      });
     }
 
-    const todayIST = new Date(Date.now() + 5.5 * 60 * 60 * 1000)
-      .toISOString()
-      .slice(0, 10);
     const fromQ = String(req.query.from || "");
     const from =
-      /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && fromQ >= todayIST ? fromQ : todayIST;
+      /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && fromQ >= earliest ? fromQ : earliest;
     const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 60);
 
     const dates = Array.from({ length: days }, (_, i) => ymdAddDays(from, i));
@@ -2177,6 +2186,7 @@ const getBookingAvailability = async (req, res) => {
       success: true,
       limited: true,
       dailyBookingLimit: limit,
+      ...cutoff,
       days: dates.map((date) => {
         const booked = countMap.get(date) || 0;
         const remaining = Math.max(0, limit - booked);

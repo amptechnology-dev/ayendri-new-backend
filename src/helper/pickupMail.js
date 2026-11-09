@@ -184,8 +184,38 @@ const sendPickupContactShipmentMail = async ({ order, shipment, address }) => {
   });
 };
 
+const sendPickupContactCancelMail = async ({ order }) => {
+  let addr = order?.pickupAddress;
+  if (!addr) {
+    const OrderModel = require("../model/order.model.js"); // lazy: circular import er jonno
+    const full = await OrderModel.findById(order._id)
+      .select("+pickupAddress")
+      .lean();
+    addr = full?.pickupAddress;
+  }
+  if (!addr?.email) return false;
+
+  return send({
+    to: addr.email,
+    subject: `Order ${order.orderNumber} cancelled: no pickup needed`,
+    html: layout({
+      title: "Order Cancelled",
+      greeting: addr.contactName,
+      intro:
+        "The following order was cancelled. Please do not hand over any package for it. Any courier pickup for this order has been cancelled.",
+      rows: [
+        ["Order number", order.orderNumber],
+        ["Store", order.storeName],
+        ["Booking date", order.hasService ? fmtDate(order.bookingDate) : null],
+        ["Pickup address", addressText(addr)],
+      ],
+    }),
+  });
+};
+
 module.exports = {
   sendPickupContactProductMail,
   sendPickupContactOrderMail,
   sendPickupContactShipmentMail,
+  sendPickupContactCancelMail,
 };

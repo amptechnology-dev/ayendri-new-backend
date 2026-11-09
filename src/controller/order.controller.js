@@ -25,7 +25,10 @@ const {
   findUnitStock,
 } = require("../helper/stockManager.js");
 const { pickupGroupKey, plainPickup } = require("../helper/pickupAddress.js");
-const { sendPickupContactOrderMail } = require("../helper/pickupMail.js");
+const {
+  sendPickupContactOrderMail,
+  sendPickupContactCancelMail,
+} = require("../helper/pickupMail.js");
 const {
   notifyNewOrder,
   notifyOrderCancelled,
@@ -68,7 +71,11 @@ const {
   resolvePaymentForStore,
 } = require("../helper/storePolicy.js");
 const { OrderRequestModel } = require("../model/orderRequest.model.js");
-const { checkCancelRefund } = require("../helper/orderRefund.js");
+const {
+  getCancelEligibility,
+  earliestBookingYmd,
+  BOOKING_CUTOFF_LABEL,
+} = require("../helper/orderRefund.js");
 const { snapshotPolicy } = require("../helper/productPolicy.js");
 const BookingSlotModel = require("../model/bookingSlot.model.js");
 const { cancelShipment } = require("../helper/shiprocket.js");
@@ -223,18 +230,17 @@ const cancelCourier = async (order) => {
   }
 };
 
-const checkCancelRefundByType = (order) => {
-  if (order.hasService) return checkCancelRefund(order);
-
-  const items = order.items || [];
-  if (!items.every((i) => i.isRefundable)) {
-    return {
-      ok: false,
-      message:
-        "This order has items that are not refundable, so it cannot be cancelled after payment",
-    };
-  }
-  return { ok: true };
+const withCancelInfo = (o) => {
+  const e = getCancelEligibility(o);
+  return {
+    ...o,
+    cancelInfo: {
+      canCancel: e.ok,
+      message: e.ok ? null : e.message,
+      deadline: e.deadline || null,
+      requiresBankDetails: o.paymentStatus === "PAID",
+    },
+  };
 };
 
 // ===================== [BOOKING LIMIT] =====================
@@ -328,6 +334,19 @@ const notifyPickupContact = (order, { force = false } = {}) => {
   );
 };
 
+const notifyPickupCancelled = (order) => {
+  if (!order) return;
+  const mailWasSent =
+    order.paymentMethod === "COD" ||
+    order.paymentOff === true ||
+    order.paymentStatus === "PAID";
+  if (!mailWasSent) return;
+
+  sendPickupContactCancelMail({ order }).catch((e) =>
+    console.error("Pickup cancel mail error:", e.message),
+  );
+};
+
 const notifyInvoice = (order) => {
   if (!order?._id) return;
   processInvoice(order._id).catch((e) =>
@@ -339,8 +358,6 @@ const notifyInvoice = (order) => {
 const todayYmdIST = () =>
   new Date(Date.now() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 10);
 
-// [CART] inactive / unverified / deleted product gulo alada kora.
-// [BOOKING] SERVICE item e date nai ba date past / aj hole badBooking e jay (cart theke muche na)
 const splitLiveItems = async (items) => {
   if (!items.length) return { live: [], dead: [], badBooking: [] };
   const ids = [...new Set(items.map((i) => String(i.productId)))];
@@ -352,7 +369,8 @@ const splitLiveItems = async (items) => {
     .select("_id productType")
     .lean();
   const typeMap = new Map(docs.map((d) => [String(d._id), d.productType]));
-  const today = todayYmdIST();
+  // [BOOKING] 4 tar age aj, 4 tar por kal theke
+  const earliest = earliestBookingYmd();
 
   const live = [];
   const dead = [];
@@ -363,7 +381,7 @@ const splitLiveItems = async (items) => {
       dead.push(i);
     } else if (
       type === "SERVICE" &&
-      (!i.bookingDate || i.bookingDate <= today)
+      (!i.bookingDate || i.bookingDate < earliest)
     ) {
       badBooking.push(i);
     } else {
@@ -379,7 +397,8 @@ const bookingIssuesResponse = (res, badBooking) =>
     code: "BOOKING_DATE_INVALID",
     message: `Please choose a valid booking date for: ${badBooking
       .map((i) => i.name)
-      .join(", ")}`,
+      .join(", ")}. Booking for today closes at ${BOOKING_CUTOFF_LABEL}`,
+    earliestBookingDate: earliestBookingYmd(),
     bookingIssues: badBooking.map((i) => ({
       itemId: i._id,
       productId: i.productId,
@@ -480,6 +499,18 @@ const attemptStoreCheckout = async ({
   const hasService = lines.some(
     (l) => productMap.get(String(l.productId))?.productType === "SERVICE",
   );
+
+  if (hasService && !dryRun) {
+    const earliest = earliestBookingYmd();
+    if (!bookingDate || bookingDate < earliest) {
+      return {
+        success: false,
+        storeId,
+        code: "BOOKING_DATE_INVALID",
+        message: `Booking for today closes at ${BOOKING_CUTOFF_LABEL}. Please choose ${earliest} or a later date`,
+      };
+    }
+  }
 
   // [CHANGE] PRODUCT + SERVICE duitar pickup address ekhon order e snapshot hobe
   const lineProducts = lines
@@ -1201,7 +1232,7 @@ const getOrdersGroupedByStore = async (
     storeName: g.storeName,
     storeUniqueId: g.storeUniqueId,
     totalOrders: g.totalOrders,
-    orders: g.orders,
+    orders: g.orders.map(withCancelInfo),
   }));
 };
 
@@ -1241,7 +1272,7 @@ const getMyOrders = async (req, res) => {
       limit: limitNum,
       totalOrders,
       totalPages: Math.ceil(totalOrders / limitNum),
-      orders,
+      orders: orders.map(withCancelInfo),
     });
   } catch (error) {
     return handleError(res, error, "Get My Orders Error");
@@ -1294,7 +1325,9 @@ const getMyOrderById = async (req, res) => {
         .json({ success: false, message: "Order not found" });
     }
 
-    return res.status(200).json({ success: true, order });
+    return res
+      .status(200)
+      .json({ success: true, order: withCancelInfo(order) });
   } catch (error) {
     return handleError(res, error, "Get My Order By Id Error");
   }
@@ -1328,26 +1361,32 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // [REFUND] paid order: booking date rule shudhu SERVICE e, PRODUCT e na
+    // [CANCEL RULE]
+    //  SERVICE : booking date er ager din bikel 4 ta porjonto
+    //  PRODUCT : courier pickup er age porjonto + (paid hole) refundDays er moddhe
+    const eligibility = getCancelEligibility(existing);
+    if (!eligibility.ok) {
+      return res.status(400).json({
+        success: false,
+        code: "CANCEL_NOT_ALLOWED",
+        message: eligibility.message,
+      });
+    }
+
+    // [REFUND] paid order cancel = refund, tai bank details / UPI must
     const wasPaid = existing.paymentStatus === "PAID";
-    if (wasPaid) {
-      const check = checkCancelRefundByType(existing); // [CHANGE]
-      if (!check.ok) {
-        return res.status(400).json({ success: false, message: check.message });
-      }
-      if (!bankDetails) {
-        return res.status(400).json({
-          success: false,
-          message: "Validation failed",
-          errors: [
-            {
-              field: "bankDetails",
-              message:
-                "Bank details or a UPI ID is required to receive your refund",
-            },
-          ],
-        });
-      }
+    if (wasPaid && !bankDetails) {
+      return res.status(400).json({
+        success: false,
+        message: "Validation failed",
+        errors: [
+          {
+            field: "bankDetails",
+            message:
+              "Bank details or a UPI ID is required to receive your refund",
+          },
+        ],
+      });
     }
 
     const courierErr = await cancelCourier(existing);
@@ -1367,7 +1406,7 @@ const cancelMyOrder = async (req, res) => {
       status: "CANCELLED",
       note: reason,
       userId,
-      extra: { cancelReason: reason, cancelledBy: "USER" },
+      extra: { cancelReason: reason, cancelledBy: "USER", autoShip: false },
     });
 
     if (!order) {
@@ -1401,6 +1440,7 @@ const cancelMyOrder = async (req, res) => {
     }
 
     notifyOrderCancelled(order);
+    notifyPickupCancelled(order);
     notifyUserOrderStatus(order);
     await restoreOrderStock(order, userId);
 
@@ -1831,6 +1871,7 @@ const updateOrderStatus = async (req, res) => {
     notifyUserOrderStatus(order);
 
     if (status === "CANCELLED") {
+      notifyPickupCancelled(order);
       await restoreOrderStock(order, userId);
     }
 

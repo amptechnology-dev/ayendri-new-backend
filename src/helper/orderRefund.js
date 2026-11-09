@@ -5,6 +5,44 @@ const todayIST = () =>
   new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
+// ===================== [BOOKING / CANCEL RULES] =====================
+const BOOKING_CUTOFF_HOUR_IST = 16; // bikel 4 ta (IST)
+const BOOKING_CUTOFF_LABEL = "4:00 PM";
+
+const istNow = () => new Date(Date.now() + IST_OFFSET_MS);
+
+const ymdAddDays = (ymd, n) => {
+  const d = new Date(`${ymd}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+// ajker 4 ta (IST) pera gele true
+const isPastBookingCutoff = () =>
+  istNow().getUTCHours() >= BOOKING_CUTOFF_HOUR_IST;
+
+// 4 tar age: aj theke booking hobe. 4 tar por: aj ar booking hobe na, kal theke
+const earliestBookingYmd = () => {
+  const today = todayIST();
+  return isPastBookingCutoff() ? ymdAddDays(today, 1) : today;
+};
+
+// SERVICE cancel deadline = booking date er ager din bikel 4 ta (IST)
+const serviceCancelDeadline = (bookingYmd) =>
+  new Date(
+    `${ymdAddDays(bookingYmd, -1)}T${String(BOOKING_CUTOFF_HOUR_IST).padStart(2, "0")}:00:00.000+05:30`,
+  );
+
+// courier product receive / pickup kore nile (Shiprocket webhook status)
+const COURIER_RECEIVED_RE =
+  /(PICKED UP|IN TRANSIT|OUT FOR DELIVERY|REACHED AT DESTINATION|SHIPPED|DELIVERED)/i;
+const COURIER_BAD_RE = /(RTO|UNDELIVERED|CANCEL)/i;
+
+const courierAlreadyReceived = (order) => {
+  const st = String(order?.shipment?.status || "");
+  return !!st && COURIER_RECEIVED_RE.test(st) && !COURIER_BAD_RE.test(st);
+};
+
 const REASON_LABELS = {
   SIZE_MISMATCH: "Size did not match",
   PRODUCT_DAMAGE: "Product is damaged",
@@ -30,7 +68,9 @@ const getDeliveredAt = (order) => {
 
 // days null = delivery agent / store decide korbe, tai kono fixed limit nei
 const withinDays = (from, days) =>
-  days === null || days === undefined || Date.now() - from.getTime() <= days * DAY_MS;
+  days === null ||
+  days === undefined ||
+  Date.now() - from.getTime() <= days * DAY_MS;
 
 const itemRefundAmount = (item) =>
   round2(item.lineTotalWithGst ?? item.lineTotal ?? 0);
@@ -41,29 +81,75 @@ const requestRefundAmount = (order, item, type) => {
   return itemRefundAmount(item);
 };
 
-// paid order cancel korle refund pawa jabe kina
-const checkCancelRefund = (order) => {
-  const items = order.items || [];
-  if (!items.length || !items.every((i) => i.isRefundable === true)) {
-    return {
-      ok: false,
-      message:
-        "This order has items that are not refundable, so a paid order cannot be cancelled",
-    };
+const getCancelEligibility = (order) => {
+  const no = (message) => ({ ok: false, message, deadline: null });
+
+  if (!["PENDING", "CONFIRMED"].includes(order.status)) {
+    return no(`Order cannot be cancelled once it is ${order.status}`);
   }
-  if (order.hasService) {
-    const booking = order.bookingDate
-      ? new Date(order.bookingDate).toISOString().slice(0, 10)
-      : null;
-    if (!booking || booking <= todayIST()) {
-      return {
-        ok: false,
-        message: "Refund is not possible on or after the booking date",
-      };
+
+  const items = order.items || [];
+  const wasPaid = order.paymentStatus === "PAID";
+  const isService =
+    order.hasService === true || items.some((i) => i.productType === "SERVICE");
+
+  // paid order cancel = refund, tai shob item refundable hote hobe
+  if (
+    wasPaid &&
+    (!items.length || !items.every((i) => i.isRefundable === true))
+  ) {
+    return no(
+      "This order has items that are not refundable, so a paid order cannot be cancelled",
+    );
+  }
+
+  // ---------- SERVICE ----------
+  if (isService) {
+    if (!order.bookingDate) {
+      return no(
+        "Booking date not found for this order, so it cannot be cancelled",
+      );
+    }
+    const booking = new Date(order.bookingDate).toISOString().slice(0, 10);
+
+    // [SAME DAY] aj-er-booking aj-i korle (ba booking date aj / aager) cancel kora jabe na
+    if (booking <= todayIST()) {
+      return no(
+        "A same-day service booking cannot be cancelled once it is placed",
+      );
+    }
+
+    const deadline = serviceCancelDeadline(booking);
+    if (Date.now() >= deadline.getTime()) {
+      return no(
+        `A service booking can be cancelled only until ${BOOKING_CUTOFF_LABEL} on the day before the booking date (${booking})`,
+      );
+    }
+    return { ok: true, message: null, deadline };
+  }
+
+  // ---------- PRODUCT ----------
+  if (courierAlreadyReceived(order)) {
+    return no(
+      "The courier has already picked up this order, so it can no longer be cancelled",
+    );
+  }
+
+  if (wasPaid) {
+    const placedAt = new Date(order.createdAt || Date.now());
+    const late = items.find((i) => !withinDays(placedAt, i.refundDays));
+    if (late) {
+      return no(
+        `The refund period of ${late.refundDays} days for "${late.name}" is over, so this order can no longer be cancelled`,
+      );
     }
   }
-  return { ok: true };
+
+  return { ok: true, message: null, deadline: null };
 };
+
+// purono naam e onno jaygay use hole jeno na bhange
+const checkCancelRefund = (order) => getCancelEligibility(order);
 
 // delivered order er item e return / replace / refund request
 const checkRequestEligibility = (order, item, type) => {
@@ -125,9 +211,16 @@ const checkRequestEligibility = (order, item, type) => {
 module.exports = {
   REASON_LABELS,
   round2,
+  todayIST,
+  ymdAddDays,
+  BOOKING_CUTOFF_LABEL,
+  isPastBookingCutoff,
+  earliestBookingYmd,
+  serviceCancelDeadline,
+  getCancelEligibility,
   resolveReasonText,
   itemRefundAmount,
-  requestRefundAmount, 
+  requestRefundAmount,
   checkCancelRefund,
   checkRequestEligibility,
 };

@@ -1,4 +1,8 @@
 const { z } = require("zod");
+const {
+  earliestBookingYmd,
+  BOOKING_CUTOFF_LABEL,
+} = require("../helper/orderRefund.js");
 
 const objectIdSchema = z
   .string()
@@ -31,7 +35,15 @@ const bookingDateSchema = z
   .trim()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "Booking date must be in YYYY-MM-DD format")
   .refine(isValidYmd, "Invalid booking date")
-  .refine((v) => v >= todayIST(), "Booking date cannot be in the past");
+  .refine(
+    (v) => v >= earliestBookingYmd(),
+    (v) => ({
+      message:
+        v < todayIST()
+          ? "Booking date cannot be in the past"
+          : `Booking for today closes at ${BOOKING_CUTOFF_LABEL}. Please choose ${earliestBookingYmd()} or a later date`,
+    }),
+  );
 
 const optionalBookingDate = z.preprocess(
   (v) => (v === "" || v === null ? undefined : v),
