@@ -72,14 +72,16 @@ const {
 } = require("../helper/storePolicy.js");
 const { OrderRequestModel } = require("../model/orderRequest.model.js");
 const {
-  getCancelEligibility,
   earliestBookingYmd,
   BOOKING_CUTOFF_LABEL,
+  getCancelEligibility,
+  getItemRequestOptions,
 } = require("../helper/orderRefund.js");
 const { snapshotPolicy } = require("../helper/productPolicy.js");
 const BookingSlotModel = require("../model/bookingSlot.model.js");
 const { cancelShipment } = require("../helper/shiprocket.js");
 const { startFulfilment } = require("../helper/fulfilment.js");
+const { markReplacementDelivered } = require("./orderRequest.controller.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -209,10 +211,10 @@ const rollbackLines = (lines) =>
   );
 
 const kickOffShipment = (order) => {
-  if (!order?.autoShip) return;
-  startFulfilment(order._id).catch((e) =>
-    console.error("Auto shipment error:", e.message),
-  );
+  // if (!order?.autoShip) return;
+  // startFulfilment(order._id).catch((e) =>
+  //   console.error("Auto shipment error:", e.message),
+  // );
 };
 
 // Shiprocket e shipment thakle cancel kore. Fail hole error message ferot dey
@@ -234,6 +236,10 @@ const withCancelInfo = (o) => {
   const e = getCancelEligibility(o);
   return {
     ...o,
+    items: (o.items || []).map((i) => ({
+      ...i,
+      requestOptions: getItemRequestOptions(o, i),
+    })),
     cancelInfo: {
       canCancel: e.ok,
       message: e.ok ? null : e.message,
@@ -1869,6 +1875,7 @@ const updateOrderStatus = async (req, res) => {
     }
 
     notifyUserOrderStatus(order);
+    if (status === "DELIVERED") markReplacementDelivered(order);
 
     if (status === "CANCELLED") {
       notifyPickupCancelled(order);

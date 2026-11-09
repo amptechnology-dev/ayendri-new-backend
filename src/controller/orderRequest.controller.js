@@ -17,6 +17,25 @@ const {
   isAvailable: isShiprocketAvailable,
   createReturnOrder,
 } = require("../helper/shiprocket.js");
+const ProductModel = require("../model/product.model.js");
+const { uploadSimpleImages } = require("../helper/productImages.js");
+const { checkStoreDelivery } = require("../helper/deliveryEstimate.js");
+const { getStorePolicy } = require("../helper/storePolicy.js");
+const {
+  locateStockUnit,
+  decrementStockForLine,
+  restoreStockForLine,
+  logStockChange,
+  findUnitStock,
+} = require("../helper/stockManager.js");
+const { isStockManaged } = require("../helper/storeSettings.js");
+const { sendPickupContactOrderMail } = require("../helper/pickupMail.js");
+const { notifyUserOrderStatus } = require("../helper/notification.helper.js");
+const { startFulfilment } = require("../helper/fulfilment.js");
+const {
+  uploadEvidenceFiles,
+  MAX_EVIDENCE_FILES,
+} = require("../helper/productImages.js");
 
 const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
@@ -32,6 +51,12 @@ const handleError = (res, error, label) => {
         message: err.message,
       })),
     });
+  }
+  // upload helper er statusCode error (file besi boro / video convert fail etc.)
+  if (error.statusCode) {
+    return res
+      .status(error.statusCode)
+      .json({ success: false, message: error.message });
   }
   console.error(`${label}:`, error);
   return res
@@ -67,9 +92,14 @@ const getRole = async (req) => {
 };
 
 const ymd = (d) => new Date(d).toISOString().slice(0, 10);
-const last10 = (p) => String(p || "").replace(/\D/g, "").slice(-10);
+const last10 = (p) =>
+  String(p || "")
+    .replace(/\D/g, "")
+    .slice(-10);
 const splitName = (full) => {
-  const parts = String(full || "Customer").trim().split(/\s+/);
+  const parts = String(full || "Customer")
+    .trim()
+    .split(/\s+/);
   return { first: parts[0], last: parts.slice(1).join(" ") || "." };
 };
 
@@ -174,6 +204,293 @@ const startReturnPickup = async (request) => {
   }
 };
 
+// ===================== [REPLACE] =====================
+
+// [TEMP OFF] order.controller er kickOffShipment er moto. Auto shipment chalu korle eta-o uncomment koro
+const kickOffReplacementShipment = (order) => {
+  // if (!order?.autoShip) return;
+  // startFulfilment(order._id).catch((e) =>
+  //   console.error("Replacement auto shipment error:", e.message),
+  // );
+};
+
+const cleanId = (id) => {
+  if (id === undefined || id === null) return null;
+  const s = String(id).trim();
+  return !s || s === "null" || s === "undefined" ? null : id;
+};
+
+// original order er parcel snapshot theke sudhu ei ekta item er parcel
+const parcelForItem = (order, item) => {
+  const p = (order.parcel?.items || []).find(
+    (x) =>
+      String(x.productId) === String(item.productId) &&
+      String(x.variantId || "") === String(item.variantId || ""),
+  );
+  if (!p) return null;
+  const weight = Math.max(0.1, round2(p.lineWeightKg || 0.5));
+  const length = p.length || 10;
+  const breadth = p.breadth || 10;
+  const height = (p.height || 10) * (p.quantity || 1);
+  const volumetricWeight = round2((length * breadth * height) / 5000);
+  return {
+    length,
+    breadth,
+    height,
+    weight,
+    volumetricWeight,
+    chargeableWeight: Math.max(weight, volumetricWeight),
+    dimsComplete: !p.usedDefaultDims,
+    weightComplete: !p.usedDefaultWeight,
+    items: [p],
+  };
+};
+
+// REPLACE approve hole notun order toiri. Fail hole stock ferot diye { ok:false } return kore
+const createReplacementOrder = async (request, userId) => {
+  const original = await OrderModel.findById(request.orderId)
+    .select("+pickupAddress")
+    .lean();
+  if (!original) {
+    return { ok: false, status: 404, message: "Original order not found" };
+  }
+
+  const item = (original.items || []).find(
+    (i) => String(i._id) === String(request.itemId),
+  );
+  if (!item) {
+    return { ok: false, status: 404, message: "Item not found in the order" };
+  }
+
+  if (await OrderModel.exists({ replacementRequestId: request._id })) {
+    return {
+      ok: false,
+      status: 409,
+      message: "A replacement order already exists for this request",
+    };
+  }
+
+  // ---------- stock (shudhu stock managed product e) ----------
+  let stock = null;
+  const product = await ProductModel.findById(item.productId).select(
+    "variants currentStock lowStockThreshold hasStockManagement productType",
+  );
+  if (product && isStockManaged(product)) {
+    const unit = locateStockUnit(product, cleanId(item.variantId));
+    if (!unit) {
+      return {
+        ok: false,
+        status: 409,
+        message:
+          "This variant is no longer available, so a replacement cannot be sent",
+      };
+    }
+    const r = await decrementStockForLine({
+      productId: product._id,
+      variantId: unit.variantId,
+      sizeVariantId: unit.sizeVariantId,
+      quantity: item.quantity,
+    });
+    if (!r.success) {
+      return {
+        ok: false,
+        status: 409,
+        message: `Not enough stock to send a replacement for "${item.name}". Update the stock and approve again`,
+      };
+    }
+    stock = {
+      unit,
+      newStock: findUnitStock(r.product, unit.variantId, unit.sizeVariantId),
+    };
+  }
+
+  const rollbackStock = async () => {
+    if (!stock) return;
+    await restoreStockForLine({
+      productId: item.productId,
+      variantId: stock.unit.variantId,
+      sizeVariantId: stock.unit.sizeVariantId,
+      quantity: item.quantity,
+    }).catch((e) => console.error("Replacement stock rollback:", e.message));
+  };
+
+  try {
+    // ---------- delivery (customer er jonno free, store courier cost bahon kore) ----------
+    const parcel = parcelForItem(original, item);
+    const policy = await getStorePolicy(original.storeId);
+    let deliveryInfo = null;
+    let autoShip = false;
+
+    if (policy.hasDelivery) {
+      try {
+        const d = await checkStoreDelivery({
+          storeId: original.storeId,
+          pincode: original.deliveryAddress?.pincode,
+          country: original.deliveryAddress?.country,
+          parcel,
+          cod: false,
+          policy,
+          fastest: false,
+          pickupPincode: original.pickupAddress?.pincode,
+        });
+        if (d.deliverable && d.info) {
+          deliveryInfo = {
+            ...d.info,
+            baseShippingCharge: d.info.shippingCharge, // courier er asol rate (report e store bear kore)
+            shippingCharge: 0,
+            shippingNote: "Free replacement delivery",
+          };
+          autoShip = d.info.mode === "NATIONAL";
+        }
+      } catch (e) {
+        console.error("Replacement delivery estimate failed:", e.message);
+      }
+    }
+
+    // courier e declared value hishebe purono price rakhchi, kintu customer er payable 0
+    const unit = Number(item.offerPrice ?? 0);
+    const declared = round2(unit * item.quantity);
+
+    const lineItem = {
+      productId: item.productId,
+      variantId: item.variantId ?? null,
+      name: item.name,
+      productCode: item.productCode,
+      image: item.image ?? null,
+      unit: item.unit,
+      color: item.color ?? null,
+      size: item.size ?? null,
+      weight: item.weight ?? null,
+      height: item.height ?? null,
+      mrp: Number(item.mrp ?? unit),
+      offerPrice: unit,
+      quantity: item.quantity,
+      lineTotal: declared,
+      priceOnRequest: false,
+      gstRates: null,
+      gstInclusive: false,
+      hsnCode: item.hsnCode ?? null,
+      taxableAmount: 0,
+      cgstAmount: 0,
+      sgstAmount: 0,
+      igstAmount: 0,
+      gstAmount: 0,
+      lineTotalWithGst: 0,
+      productType: "PRODUCT",
+      // replacement order e abar return / replace / refund hobe na
+      isReturnable: false,
+      returnDays: null,
+      isReplaceable: false,
+      replaceDays: null,
+      isRefundable: false,
+      refundDays: null,
+    };
+
+    const order = await OrderModel.create({
+      orderType: "REPLACEMENT",
+      replacementOf: original._id,
+      replacementRequestId: request._id,
+      replacementRequestNumber: request.requestNumber,
+
+      userId: original.userId,
+      storeId: original.storeId,
+      storeName: original.storeName,
+      storeUniqueId: original.storeUniqueId,
+
+      items: [lineItem],
+      totalItems: item.quantity,
+      totalMrp: 0,
+      discount: 0,
+      gstMode: original.gstMode || "INTRA",
+      subtotal: 0,
+      totalTaxable: 0,
+      totalCgst: 0,
+      totalSgst: 0,
+      totalIgst: 0,
+      totalGst: 0,
+      totalAmount: 0, // customer kichu dibe na
+      itemsTotal: declared, // shudhu Shiprocket er sub_total er jonno
+
+      deliveryAddress: original.deliveryAddress,
+      note: `Replacement for order ${original.orderNumber} (${request.requestNumber})`,
+      shippingCharge: 0,
+      deliveryEnabled: policy.hasDelivery,
+      deliveryInfo,
+      parcel: policy.hasDelivery ? parcel : null,
+      pickupAddress: original.pickupAddress || null,
+      expectedDeliveryDate: deliveryInfo?.estimatedMaxDate || null,
+
+      // taka nai: courier e Prepaid jabe (paymentOff = true)
+      paymentMethod: "COD",
+      paymentOff: true,
+      paymentStatus: "PENDING",
+      paymentExpiresAt: null,
+
+      status: "CONFIRMED",
+      statusHistory: [
+        {
+          status: "CONFIRMED",
+          changedBy: userId,
+          note: `Replacement approved (${request.requestNumber})`,
+          at: new Date(),
+        },
+      ],
+
+      autoShip,
+      shipStartDate: new Date(),
+    });
+
+    if (stock) {
+      await logStockChange({
+        productId: item.productId,
+        storeId: original.storeId,
+        userId,
+        variantId: stock.unit.variantId,
+        sizeVariantId: stock.unit.sizeVariantId,
+        productName: item.name,
+        variantLabel:
+          [item.color, item.size, item.weight, item.height]
+            .filter(Boolean)
+            .join(" / ") || "Default",
+        type: "OUT",
+        reason: "OTHER",
+        note: `Replacement order ${order.orderNumber}`,
+        previousStock: stock.newStock + item.quantity,
+        newStock: stock.newStock,
+      }).catch((e) => console.error("Replacement stock log:", e.message));
+    }
+
+    return { ok: true, order };
+  } catch (err) {
+    console.error("Create replacement order error:", err);
+    await rollbackStock();
+    return {
+      ok: false,
+      status: 500,
+      message: "Could not create the replacement order. Please try again",
+    };
+  }
+};
+
+// replacement order DELIVERED hole request auto COMPLETED
+const markReplacementDelivered = async (order) => {
+  if (order?.orderType !== "REPLACEMENT" || !order.replacementRequestId) return;
+  try {
+    await OrderRequestModel.updateOne(
+      { _id: order.replacementRequestId, status: "APPROVED" },
+      {
+        $set: {
+          status: "COMPLETED",
+          completedAt: new Date(),
+          completeNote: "Replacement delivered",
+        },
+      },
+    );
+  } catch (e) {
+    console.error("Mark replacement delivered error:", e.message);
+  }
+};
+
 const createOrderRequest = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -185,8 +502,24 @@ const createOrderRequest = async (req, res) => {
         .json({ success: false, message: "Invalid order id" });
     }
 
+    // multipart/form-data te bankDetails JSON string hoye ashe
+    const body = { ...(req.body || {}) };
+    if (typeof body.bankDetails === "string") {
+      if (!body.bankDetails.trim()) {
+        delete body.bankDetails;
+      } else {
+        try {
+          body.bankDetails = JSON.parse(body.bankDetails);
+        } catch {
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid bankDetails format" });
+        }
+      }
+    }
+
     const { itemId, type, reasonCode, reason, bankDetails } =
-      createRequestSchema.parse(req.body || {});
+      createRequestSchema.parse(body);
 
     const order = await OrderModel.findOne({ _id: orderId, userId }).lean();
     if (!order) {
@@ -241,13 +574,21 @@ const createOrderRequest = async (req, res) => {
     // [GUARD] ager refund soho order e jototuku paid, tar beshi ferot hobe na
     if (moneyBack) {
       const refundableTotal = order.itemsTotal ?? order.totalAmount;
-      if (Number(order.refundedAmount || 0) + refundAmount > refundableTotal + 0.005) {
+      if (
+        Number(order.refundedAmount || 0) + refundAmount >
+        refundableTotal + 0.005
+      ) {
         return res.status(400).json({
           success: false,
           message: "Refund amount exceeds the paid amount of this order",
         });
       }
     }
+
+    const files = Array.isArray(req.files)
+      ? req.files
+      : Object.values(req.files || {}).flat();
+    const evidence = await uploadEvidenceFiles(files);
 
     const request = await OrderRequestModel.create({
       orderId: order._id,
@@ -264,6 +605,7 @@ const createOrderRequest = async (req, res) => {
       reason: resolveReasonText(reasonCode, reason),
       refundAmount,
       bankDetails: moneyBack ? bankDetails : null,
+      evidence,
     });
 
     return res.status(201).json({
@@ -330,32 +672,43 @@ const getMyRequests = async (req, res) => {
   }
 };
 
-// ===================== STORE: LIST REQUESTS =====================
-// GET /api/order/store-requests?orderId&status&type&storeId&search&page&limit
-// Shudhu nijer store er request. ADMIN dekhte pabe na.
 const getStoreRequests = async (req, res) => {
   try {
     const userId = getUserId(req);
     const { orderId, status, type, storeId, search } = req.query;
+    const isAdmin = (await getRole(req)) === "ADMIN";
 
-    const stores = await StoreModel.find({ userId }).select("_id").lean();
-    const ownIds = stores.map((s) => String(s._id));
+    const match = {};
 
-    const match = { storeId: { $in: ownIds } };
-
-    if (storeId) {
-      if (!mongoose.isValidObjectId(storeId)) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Invalid store id" });
+    if (isAdmin) {
+      // ADMIN: shob store (view only)
+      if (storeId) {
+        if (!mongoose.isValidObjectId(storeId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid store id" });
+        }
+        match.storeId = storeId;
       }
-      if (!ownIds.includes(String(storeId))) {
-        return res.status(403).json({
-          success: false,
-          message: "Not authorized for this store",
-        });
+    } else {
+      const stores = await StoreModel.find({ userId }).select("_id").lean();
+      const ownIds = stores.map((s) => String(s._id));
+      match.storeId = { $in: ownIds };
+
+      if (storeId) {
+        if (!mongoose.isValidObjectId(storeId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: "Invalid store id" });
+        }
+        if (!ownIds.includes(String(storeId))) {
+          return res.status(403).json({
+            success: false,
+            message: "Not authorized for this store",
+          });
+        }
+        match.storeId = storeId;
       }
-      match.storeId = storeId;
     }
 
     if (orderId) {
@@ -381,7 +734,7 @@ const getStoreRequests = async (req, res) => {
 
     const { pageNum, limitNum } = parsePagination(req.query);
 
-    const [requests, total] = await Promise.all([
+    const [rows, total] = await Promise.all([
       OrderRequestModel.find(match)
         .sort({ createdAt: -1, _id: -1 })
         .skip((pageNum - 1) * limitNum)
@@ -389,6 +742,24 @@ const getStoreRequests = async (req, res) => {
         .lean(),
       OrderRequestModel.countDocuments(match),
     ]);
+
+    // ADMIN table e store name / id dekhanor jonno
+    let requests = rows;
+    if (isAdmin && rows.length) {
+      const ids = [...new Set(rows.map((r) => String(r.storeId)))];
+      const stores = await StoreModel.find({ _id: { $in: ids } })
+        .select("storeName storeUniqueId")
+        .lean();
+      const map = new Map(stores.map((s) => [String(s._id), s]));
+      requests = rows.map((r) => {
+        const s = map.get(String(r.storeId));
+        return {
+          ...r,
+          storeName: s?.storeName || null,
+          storeUniqueId: s?.storeUniqueId || null,
+        };
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -454,8 +825,10 @@ const decideRequest = async (req, res) => {
       });
     }
 
-    // [RETURN] approve hole courier return pickup toiri
     let returnShipment = null;
+    let replacementOrder = null;
+
+    // [RETURN] approve hole courier return pickup toiri
     if (action === "APPROVE" && request.type === "RETURN") {
       returnShipment = await startReturnPickup(request);
       request = await OrderRequestModel.findByIdAndUpdate(
@@ -465,17 +838,75 @@ const decideRequest = async (req, res) => {
       ).lean();
     }
 
+    // [REPLACE] approve hole: notun order + purono item er courier pickup
+    if (action === "APPROVE" && request.type === "REPLACE") {
+      const rep = await createReplacementOrder(request, userId);
+
+      if (!rep.ok) {
+        // approve undo: request abar REQUESTED e, store thik kore abar approve korbe
+        await OrderRequestModel.updateOne(
+          { _id: requestId, status: "APPROVED" },
+          {
+            $set: { status: "REQUESTED", storeNote: null, decidedAt: null },
+            $unset: { decidedBy: "" },
+          },
+        );
+        return res
+          .status(rep.status || 409)
+          .json({ success: false, message: rep.message });
+      }
+
+      replacementOrder = rep.order;
+      returnShipment = await startReturnPickup(request);
+
+      request = await OrderRequestModel.findByIdAndUpdate(
+        requestId,
+        {
+          $set: {
+            returnShipment,
+            replacementOrderId: replacementOrder._id,
+            replacementOrderNumber: replacementOrder.orderNumber,
+          },
+        },
+        { new: true },
+      ).lean();
+
+      notifyUserOrderStatus(replacementOrder);
+      if (replacementOrder.pickupAddress?.email) {
+        sendPickupContactOrderMail({ order: replacementOrder }).catch((e) =>
+          console.error("Replacement pickup mail error:", e.message),
+        );
+      }
+      kickOffReplacementShipment(replacementOrder);
+    }
+
+    let message;
+    if (action !== "APPROVE") {
+      message = "Request rejected";
+    } else if (replacementOrder) {
+      message =
+        returnShipment?.status === "CREATED"
+          ? `Replacement approved. Order ${replacementOrder.orderNumber} created and courier pickup of the old item booked`
+          : `Replacement approved. Order ${replacementOrder.orderNumber} created. Courier pickup of the old item was not created (${returnShipment?.note || "n/a"}), arrange it manually`;
+    } else if (returnShipment?.status === "CREATED") {
+      message = "Request approved and courier return pickup created";
+    } else if (returnShipment) {
+      message = `Request approved. Courier return was not created (${returnShipment.note}). Arrange the return manually`;
+    } else {
+      message = "Request approved";
+    }
+
     return res.status(200).json({
       success: true,
-      message:
-        action === "APPROVE"
-          ? returnShipment?.status === "CREATED"
-            ? "Request approved and courier return pickup created"
-            : returnShipment
-              ? `Request approved. Courier return was not created (${returnShipment.note}). Arrange the return manually`
-              : "Request approved"
-          : "Request rejected",
+      message,
       request,
+      replacementOrder: replacementOrder
+        ? {
+            _id: replacementOrder._id,
+            orderNumber: replacementOrder.orderNumber,
+            autoShip: replacementOrder.autoShip,
+          }
+        : null,
     });
   } catch (error) {
     return handleError(res, error, "Decide Request Error");
@@ -586,4 +1017,5 @@ module.exports = {
   getStoreRequests,
   decideRequest,
   completeRequest,
+  markReplacementDelivered,
 };

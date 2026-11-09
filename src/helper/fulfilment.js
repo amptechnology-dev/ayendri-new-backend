@@ -71,6 +71,9 @@ const dueFilter = (now = new Date()) => ({
 
 // Idempotent: ekbar e ekta-i chalabe (lock), ager step sesh thakle skip kore
 const startFulfilment = async (orderId) => {
+  
+  // [TEMP OFF]
+  return { started: false, disabled: true };
   const order = await OrderModel.findOneAndUpdate(
     { _id: orderId, ...dueFilter() },
     {

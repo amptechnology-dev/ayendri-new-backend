@@ -348,9 +348,56 @@ const uploadAdsMedia = async (files = []) => {
   return { url, mediaType: "gif" };
 };
 
+const MAX_EVIDENCE_FILES = 5;
+const MAX_EVIDENCE_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
+
+const uploadEvidenceFiles = async (files = []) => {
+  const list = (Array.isArray(files) ? files : Object.values(files || {}).flat())
+    .filter((f) => /^evidence\d+$/.test(f.fieldname))
+    .sort(
+      (a, b) =>
+        Number(a.fieldname.replace("evidence", "")) -
+        Number(b.fieldname.replace("evidence", "")),
+    );
+  if (!list.length) return [];
+
+  if (list.length > MAX_EVIDENCE_FILES) {
+    throw httpError(
+      `You can attach at most ${MAX_EVIDENCE_FILES} photos / videos`,
+    );
+  }
+
+  for (const f of list) {
+    const isVideo = isVideoFile(f);
+    if (!isVideo && !f.mimetype.startsWith("image/")) {
+      throw httpError("Only image or video files are allowed");
+    }
+    if (isVideo && f.size > MAX_SOURCE_VIDEO_SIZE) {
+      throw httpError(
+        `Video must be under ${MAX_SOURCE_VIDEO_SIZE / 1024 / 1024}MB`,
+      );
+    }
+    if (!isVideo && f.size > MAX_EVIDENCE_IMAGE_SIZE) {
+      throw httpError(
+        `Each image must be under ${MAX_EVIDENCE_IMAGE_SIZE / 1024 / 1024}MB`,
+      );
+    }
+  }
+
+  return Promise.all(
+    list.map(async (file) => ({
+      url: await uploadPreparedFile("amp-store/requests", file),
+      // video GIF hoye jay, tai type dekhe nai, original file dekhe
+      type: isVideoFile(file) ? "VIDEO_GIF" : "IMAGE",
+    })),
+  );
+};
+
 module.exports = {
   uploadSimpleImages,
   uploadVariantImages,
   uploadBannerMedia,
   uploadAdsMedia,
+  uploadEvidenceFiles,
+  MAX_EVIDENCE_FILES,
 };

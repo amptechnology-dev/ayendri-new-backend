@@ -28,9 +28,8 @@ const ProductModel = require("../model/product.model.js");
 const shiprocket = require("../helper/shiprocket.js");
 const { notifyUserOrderStatus } = require("../helper/notification.helper.js");
 const { getStorePolicy } = require("../helper/storePolicy.js");
-const {
-  sendPickupContactShipmentMail,
-} = require("../helper/pickupMail.js");
+const { sendPickupContactShipmentMail } = require("../helper/pickupMail.js");
+const { markReplacementDelivered } = require("./orderRequest.controller.js");
 
 const parseDate = (v) => {
   if (!v) return null;
@@ -765,7 +764,7 @@ const createShiprocketShipment = async (req, res) => {
     }
 
     // ---------- Step C: pickup request ----------
-       let pickupError = null;
+    let pickupError = null;
     let pickupJustRequested = false; // [MAIL] shudhu ei call e notun pickup hole mail
     if (!shipment.pickupRequestedAt) {
       try {
@@ -798,7 +797,7 @@ const createShiprocketShipment = async (req, res) => {
     }
     await OrderModel.updateOne({ _id: orderId }, { $set: set });
 
-     if (pickupJustRequested && order.pickupAddress?.email) {
+    if (pickupJustRequested && order.pickupAddress?.email) {
       sendPickupContactShipmentMail({
         order,
         shipment,
@@ -843,7 +842,8 @@ const safeEqual = (a, b) => {
   return x.length === y.length && crypto.timingSafeEqual(x, y);
 };
 
-const PICKED_RE = /(PICKED UP|IN TRANSIT|OUT FOR DELIVERY|REACHED AT DESTINATION|SHIPPED)/i;
+const PICKED_RE =
+  /(PICKED UP|IN TRANSIT|OUT FOR DELIVERY|REACHED AT DESTINATION|SHIPPED)/i;
 const BAD_RE = /(RTO|UNDELIVERED|CANCEL)/i;
 
 const courierWebhook = async (req, res) => {
@@ -855,7 +855,9 @@ const courierWebhook = async (req, res) => {
 
     const body = req.body || {};
     const awb = String(body.awb || body.awb_code || "").trim();
-    const rawStatus = String(body.current_status || body.shipment_status || "").trim();
+    const rawStatus = String(
+      body.current_status || body.shipment_status || "",
+    ).trim();
 
     if (!awb || !rawStatus) {
       return res.status(200).json({ success: true, ignored: true });
@@ -872,7 +874,8 @@ const courierWebhook = async (req, res) => {
       "shipment.status": rawStatus,
       "shipment.lastEventAt": parseDate(body.current_timestamp) || new Date(),
     };
-    if (body.courier_name) set["shipment.courierName"] = String(body.courier_name);
+    if (body.courier_name)
+      set["shipment.courierName"] = String(body.courier_name);
 
     const etd = parseDate(body.etd);
     if (etd) {
@@ -907,9 +910,18 @@ const courierWebhook = async (req, res) => {
       updated = await OrderModel.findOneAndUpdate(
         { _id: order._id, status: { $in: ["CONFIRMED", "SHIPPED"] } },
         {
-          $set: { status: "DELIVERED", shipmentDone: true, autoShip: false, ...extra },
+          $set: {
+            status: "DELIVERED",
+            shipmentDone: true,
+            autoShip: false,
+            ...extra,
+          },
           $push: {
-            statusHistory: { status: "DELIVERED", note: "Delivered by courier", at: new Date() },
+            statusHistory: {
+              status: "DELIVERED",
+              note: "Delivered by courier",
+              at: new Date(),
+            },
           },
         },
         { new: true },
@@ -926,7 +938,11 @@ const courierWebhook = async (req, res) => {
         {
           $set: { status: "SHIPPED" },
           $push: {
-            statusHistory: { status: "SHIPPED", note: "Picked up by courier", at: new Date() },
+            statusHistory: {
+              status: "SHIPPED",
+              note: "Picked up by courier",
+              at: new Date(),
+            },
           },
         },
         { new: true },
@@ -934,6 +950,7 @@ const courierWebhook = async (req, res) => {
     }
 
     if (updated) notifyUserOrderStatus(updated);
+    if (updated?.status === "DELIVERED") markReplacementDelivered(updated);
 
     return res.status(200).json({ success: true });
   } catch (error) {

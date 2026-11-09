@@ -112,10 +112,11 @@ setInterval(() => {
   expireUnpaidOrders().catch((e) => console.error("Expire orders error:", e));
 }, 5 * 60 * 1000);
 
-setInterval(
-  () => processDueShipments().catch((e) => console.error("Shipment cron:", e.message)),
-  5 * 60 * 1000,
-);
+// Temporary off due to shiprocket off
+// setInterval(
+//   () => processDueShipments().catch((e) => console.error("Shipment cron:", e.message)),
+//   5 * 60 * 1000,
+// );
 
 const port = process.env.PORT || 8090;
 

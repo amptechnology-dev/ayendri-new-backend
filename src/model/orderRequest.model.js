@@ -15,6 +15,14 @@ const bankDetailsSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const evidenceSchema = new mongoose.Schema(
+  {
+    url: { type: String, required: true },
+    type: { type: String, enum: ["IMAGE", "VIDEO_GIF"], default: "IMAGE" },
+  },
+  { _id: false },
+);
+
 const orderRequestSchema = new mongoose.Schema(
   {
     requestNumber: { type: String, unique: true },
@@ -57,6 +65,17 @@ const orderRequestSchema = new mongoose.Schema(
     refundAmount: { type: Number, default: 0, min: 0 },
     bankDetails: { type: bankDetailsSchema, default: null },
     returnShipment: { type: mongoose.Schema.Types.Mixed, default: null },
+
+    // user er deya proof (image / video)
+    evidence: { type: [evidenceSchema], default: [] },
+
+    // REPLACE approve hole je notun order toiri hoy
+    replacementOrderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Order",
+      default: null,
+    },
+    replacementOrderNumber: { type: String, default: null },
 
     storeNote: { type: String, default: null },
     decidedAt: { type: Date, default: null },

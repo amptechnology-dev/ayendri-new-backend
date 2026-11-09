@@ -391,6 +391,23 @@ const orderSchema = new mongoose.Schema(
 
     cancelReason: { type: String, default: null },
     cancelledBy: { type: String, enum: ["USER", "STORE"], default: null },
+    orderType: {
+      type: String,
+      enum: ["NORMAL", "REPLACEMENT"],
+      default: "NORMAL",
+      index: true,
+    },
+    replacementOf: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Order",
+      default: null,
+    },
+    replacementRequestId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "OrderRequest",
+      default: null,
+    },
+    replacementRequestNumber: { type: String, default: null },
   },
   { timestamps: true },
 );
@@ -406,6 +423,8 @@ orderSchema.index({ "paymentAttempts.txnid": 1 });
 // expire cron query
 orderSchema.index({ paymentStatus: 1, paymentExpiresAt: 1 });
 orderSchema.index({ status: 1, autoShip: 1, shipmentDone: 1, shipStartDate: 1 });
+orderSchema.index({ replacementOf: 1 });
+orderSchema.index({ replacementRequestId: 1 });
 
 orderSchema.pre("save", async function () {
   if (this.isNew && !this.orderNumber) {

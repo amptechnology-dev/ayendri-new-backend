@@ -27,6 +27,7 @@ const {
   decideRequest,
   completeRequest,
 } = require("../controller/orderRequest.controller.js");
+const { uploadMultiImages } = require("../middleware/multiMulter.js");
 
 // ---------- USER ----------
 router.post("/checkout", verifyJwt, authorize("USER"), checkout);
@@ -63,6 +64,7 @@ router.post(
   "/my-orders/:orderId/requests",
   verifyJwt,
   authorize("USER"),
+  uploadMultiImages,
   createOrderRequest,
 );
 router.get("/my-requests", verifyJwt, authorize("USER"), getMyRequests);

@@ -84,6 +84,10 @@ const requestRefundAmount = (order, item, type) => {
 const getCancelEligibility = (order) => {
   const no = (message) => ({ ok: false, message, deadline: null });
 
+  if (order.orderType === "REPLACEMENT") {
+    return no("A replacement order cannot be cancelled");
+  }
+
   if (!["PENDING", "CONFIRMED"].includes(order.status)) {
     return no(`Order cannot be cancelled once it is ${order.status}`);
   }
@@ -153,6 +157,13 @@ const checkCancelRefund = (order) => getCancelEligibility(order);
 
 // delivered order er item e return / replace / refund request
 const checkRequestEligibility = (order, item, type) => {
+  if (order.orderType === "REPLACEMENT") {
+    return {
+      ok: false,
+      message: "No request can be raised on a replacement order",
+    };
+  }
+
   if (item.productType === "SERVICE") {
     return {
       ok: false,
@@ -208,6 +219,28 @@ const checkRequestEligibility = (order, item, type) => {
   return { ok: true };
 };
 
+const getItemRequestOptions = (order, item) => {
+  const out = {};
+  const daysOf = {
+    RETURN: item.returnDays,
+    REPLACE: item.replaceDays,
+    REFUND: item.refundDays,
+  };
+  for (const type of ["RETURN", "REPLACE", "REFUND"]) {
+    const r = checkRequestEligibility(order, item, type);
+    const days = daysOf[type];
+    out[type] = {
+      ok: r.ok,
+      message: r.ok ? null : r.message,
+      deadline:
+        order.status === "DELIVERED" && days
+          ? new Date(getDeliveredAt(order).getTime() + days * DAY_MS)
+          : null,
+    };
+  }
+  return out;
+};
+
 module.exports = {
   REASON_LABELS,
   round2,
@@ -223,4 +256,5 @@ module.exports = {
   requestRefundAmount,
   checkCancelRefund,
   checkRequestEligibility,
+  getItemRequestOptions
 };
