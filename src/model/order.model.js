@@ -2,7 +2,13 @@ const mongoose = require("mongoose");
 const { getNextSequence } = require("../helper/counter.js");
 
 // ORDER_STATUSES: PENDING purono data er jonno model e thakuk, notun order e ar use hobe na
-const ORDER_STATUSES = ["PENDING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+const ORDER_STATUSES = [
+  "PENDING",
+  "CONFIRMED",
+  "SHIPPED",
+  "DELIVERED",
+  "CANCELLED",
+];
 
 const PAYMENT_METHODS = ["COD", "ONLINE"];
 const PAYMENT_STATUSES = ["PENDING", "INITIATED", "PAID", "FAILED", "REFUNDED"];
@@ -303,7 +309,11 @@ const orderSchema = new mongoose.Schema(
       default: null,
     },
     checkoutId: { type: mongoose.Schema.Types.ObjectId, default: null },
-
+    checkoutSessionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CheckoutSession",
+      default: undefined,
+    },
     userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -373,10 +383,10 @@ const orderSchema = new mongoose.Schema(
     status: { type: String, enum: ORDER_STATUSES, default: "PENDING" },
     statusHistory: [statusHistorySchema],
 
-    autoShip: { type: Boolean, default: false },       // Shiprocket diye auto shipment hobe kina
-    shipStartDate: { type: Date, default: null },      // booking date / order er somoy
-    shipmentDone: { type: Boolean, default: false },   // AWB + pickup request shesh
-    shipLockUntil: { type: Date, default: null },      // double run thekate lock
+    autoShip: { type: Boolean, default: false }, // Shiprocket diye auto shipment hobe kina
+    shipStartDate: { type: Date, default: null }, // booking date / order er somoy
+    shipmentDone: { type: Boolean, default: false }, // AWB + pickup request shesh
+    shipLockUntil: { type: Date, default: null }, // double run thekate lock
     shipTries: { type: Number, default: 0 },
     shipError: { type: String, default: null },
 
@@ -422,9 +432,21 @@ orderSchema.index({ "shipment.awb": 1 });
 orderSchema.index({ "paymentAttempts.txnid": 1 });
 // expire cron query
 orderSchema.index({ paymentStatus: 1, paymentExpiresAt: 1 });
-orderSchema.index({ status: 1, autoShip: 1, shipmentDone: 1, shipStartDate: 1 });
+orderSchema.index({
+  status: 1,
+  autoShip: 1,
+  shipmentDone: 1,
+  shipStartDate: 1,
+});
 orderSchema.index({ replacementOf: 1 });
 orderSchema.index({ replacementRequestId: 1 });
+orderSchema.index(
+  { checkoutSessionId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { checkoutSessionId: { $type: "objectId" } },
+  },
+);
 
 orderSchema.pre("save", async function () {
   if (this.isNew && !this.orderNumber) {

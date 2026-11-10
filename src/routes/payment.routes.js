@@ -6,6 +6,9 @@ const {
   payuCallback,
   verifyPayment,
   simulatePayment,
+  initiateSessionPayment,
+  verifySessionPayment,
+  simulateSessionPayment
 } = require("../controller/payment.controller.js");
 const {
   getReportMeta,
@@ -103,6 +106,27 @@ router.post(
   verifyJwt,
   authorize("USER"),
   simulatePayment,
+);
+
+router.post(
+  "/session/initiate/:sessionId",
+  verifyJwt,
+  authorize("USER"),
+  initiateSessionPayment,
+);
+router.get(
+  "/session/verify/:sessionId",
+  verifyJwt,
+  authorize("USER"),
+  verifySessionPayment,
+);
+
+// TESTING ONLY
+router.post(
+  "/dev/simulate-session/:sessionId",
+  verifyJwt,
+  authorize("USER"),
+  simulateSessionPayment,
 );
 
 module.exports = router;

@@ -82,6 +82,7 @@ const BookingSlotModel = require("../model/bookingSlot.model.js");
 const { cancelShipment } = require("../helper/shiprocket.js");
 const { startFulfilment } = require("../helper/fulfilment.js");
 const { markReplacementDelivered } = require("./orderRequest.controller.js");
+const CheckoutSessionModel = require("../model/checkoutSession.model.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -263,6 +264,130 @@ const releaseBookingSlots = async (productIds, ymd) => {
       ),
     ),
   );
+};
+
+// ===================== [ONLINE PAYMENT SESSION] =====================
+
+// stock manage kora line gulor SALE log (order toiri hobar por)
+const logSaleLines = (lines, userId) =>
+  Promise.all(
+    (lines || []).map((l) =>
+      logStockChange({
+        productId: l.productId,
+        storeId: l.storeId,
+        userId,
+        variantId: l.variantId,
+        sizeVariantId: l.sizeVariantId,
+        productName: l.productName,
+        variantLabel: l.variantLabel,
+        type: "OUT",
+        reason: "SALE",
+        previousStock: l.newStock + l.quantity,
+        newStock: l.newStock,
+      }),
+    ),
+  );
+
+// customer ke session er shudhu safe info dao (orderPayload / pickupAddress na)
+const publicSession = (s) => ({
+  sessionId: s._id,
+  storeId: s.storeId,
+  storeName: s.storeName,
+  status: s.status,
+  amount: s.amount,
+  itemsTotal: s.itemsTotal,
+  shippingCharge: s.shippingCharge,
+  expiresAt: s.expiresAt,
+  orderId: s.orderId || null,
+});
+
+// payment fail / expire hole hold kora stock + booking slot ferot
+const releaseSessionHolds = async (session) => {
+  await rollbackLines(session.stockLines || []);
+  if (session.bookingSlotProductIds?.length && session.bookingYmd) {
+    await releaseBookingSlots(
+      session.bookingSlotProductIds,
+      session.bookingYmd,
+    );
+  }
+};
+
+const notifyOrderPlaced = (order) => {
+  notifyNewOrder(order);
+  notifyUserOrderStatus(order);
+};
+
+// PAID session theke Order toiri kore. Idempotent:
+// duplicate call hole unique index (checkoutSessionId) e dhora porbe, notun order hobe na
+const finalizeSessionOrder = async (sessionId) => {
+  const session = await CheckoutSessionModel.findById(sessionId).lean();
+  if (!session || session.status !== "PAID") {
+    return { order: null, created: false };
+  }
+
+  if (session.orderId) {
+    const existing = await OrderModel.findById(session.orderId).lean();
+    return { order: existing, created: false };
+  }
+
+  const payload = session.orderPayload;
+  let order = null;
+  let created = false;
+
+  try {
+    const doc = await OrderModel.create({
+      ...payload,
+      checkoutSessionId: session._id,
+      paymentMethod: "ONLINE",
+      paymentStatus: "PAID",
+      paymentOff: false,
+      paidAt: session.paidAt || new Date(),
+      paymentExpiresAt: null,
+      paymentAttempts: session.attempts,
+      shipStartDate:
+        payload.hasService && payload.bookingDate
+          ? payload.bookingDate
+          : new Date(),
+      statusHistory: [
+        {
+          status: "CONFIRMED",
+          changedBy: session.userId,
+          note: "Order placed",
+          at: new Date(),
+        },
+      ],
+    });
+    order = doc.toObject();
+    created = true;
+  } catch (err) {
+    if (err?.code === 11000 && err?.keyPattern?.checkoutSessionId) {
+      order = await OrderModel.findOne({
+        checkoutSessionId: session._id,
+      }).lean();
+    } else {
+      throw err;
+    }
+  }
+
+  await CheckoutSessionModel.updateOne(
+    { _id: session._id },
+    { $set: { orderId: order._id } },
+  );
+
+  // order toiri hoye geche, tai ekhaner error order bondho korbe na
+  try {
+    if (session.cartId && session.cartItemIds?.length) {
+      await CartModel.updateOne(
+        { _id: session.cartId, userId: session.userId },
+        { $pull: { items: { _id: { $in: session.cartItemIds } } } },
+      );
+    }
+    if (created) await logSaleLines(session.stockLines, session.userId);
+  } catch (e) {
+    console.error("Session post-create cleanup error:", e.message);
+  }
+
+  return { order, created };
 };
 
 // SERVICE product er dailyBookingLimit onujayi slot reserve kore. Atomic:
@@ -477,6 +602,7 @@ const attemptStoreCheckout = async ({
   bookingDate, // [BOOKING] "YYYY-MM-DD" (dryRun e lagbe na)
   paymentMethod,
   fastestDelivery = false, // [FASTEST] customer's choice at order time
+  cart = null, // { cartId, itemIds } -> ONLINE payment success hole cart theke remove
   dryRun = false,
 }) => {
   const store = await StoreModel.findOne({
@@ -518,7 +644,6 @@ const attemptStoreCheckout = async ({
     }
   }
 
-  // [CHANGE] PRODUCT + SERVICE duitar pickup address ekhon order e snapshot hobe
   const lineProducts = lines
     .map((l) => productMap.get(String(l.productId)))
     .filter(Boolean);
@@ -535,11 +660,8 @@ const attemptStoreCheckout = async ({
         "Items in this order are picked up from different addresses. Please order them separately",
     };
   }
-  // order e snapshot (mail + WhatsApp + shipment er jonno)
   const pickupAddress = plainPickup(lineProducts.find((p) => p.pickupAddress));
 
-  // [CHANGE] delivery estimate / courier rate e shudhu PRODUCT er pickup pincode jabe.
-  // Service e courier lage na, ar custom pickup dile LOCAL delivery bondho hoye jeto
   const shippingPickupPincode = lineProducts.find(
     (p) => p.productType !== "SERVICE" && p.pickupAddress?.pincode,
   )?.pickupAddress?.pincode;
@@ -560,7 +682,6 @@ const attemptStoreCheckout = async ({
 
   const parcel = linesParcel(lines, productMap);
 
-  // [FASTEST] only the customer's choice at order time decides. Product flag is display only now
   const wantsFastest = fastestDelivery === true;
 
   const deliveryArgs = {
@@ -570,7 +691,7 @@ const attemptStoreCheckout = async ({
     parcel,
     cod: effectiveMethod === "COD" && !paymentOff,
     policy,
-    pickupPincode: shippingPickupPincode, // [CHANGE]
+    pickupPincode: shippingPickupPincode,
   };
 
   const delivery = await checkStoreDelivery({
@@ -587,7 +708,6 @@ const attemptStoreCheckout = async ({
     };
   }
 
-  // [GST] store state != delivery state hole IGST, nahole CGST+SGST
   const gstMode = getGstMode(store.state, deliveryAddress?.state);
 
   const orderItems = [];
@@ -595,7 +715,6 @@ const attemptStoreCheckout = async ({
   const outOfStockLines = [];
 
   for (const rawLine of lines) {
-    // [FIX] "null" / "undefined" string variantId ke real null kora
     const line = { ...rawLine, variantId: cleanVariantId(rawLine.variantId) };
 
     const product = productMap.get(String(line.productId));
@@ -619,18 +738,14 @@ const attemptStoreCheckout = async ({
       continue;
     }
 
-    // [TIER] quantity onujayi server-side price (client theke kono price nei)
     const unitPrice = getUnitPrice(
       product,
       line.variantId,
       source.offerPrice,
       line.quantity,
     );
-    // [QUOTE] price nai -> store estimate dibe
     const priceOnRequest = !hasPrice(unitPrice);
 
-    // [STOCK] stock management ON (hasStockManagement === true) hole-i
-    // stock check + minus hoy. OFF hole shudhu order hoy, out-of-stock hobe na.
     if (isStockManaged(product)) {
       const unit = locateStockUnit(product, line.variantId);
       if (!unit) {
@@ -644,7 +759,6 @@ const attemptStoreCheckout = async ({
       }
 
       if (dryRun) {
-        // preview: stock minus na kore shudhu check
         if (Number(unit.currentStock) < Number(line.quantity)) {
           outOfStockLines.push({
             productId: line.productId,
@@ -676,7 +790,6 @@ const attemptStoreCheckout = async ({
           continue;
         }
 
-        // [STOCK] rollback + SALE log shudhu stock managed line er jonno
         decrementedLines.push({
           productId: product._id,
           storeId: product.storeId,
@@ -718,19 +831,17 @@ const attemptStoreCheckout = async ({
         : priceOnRequest
           ? null
           : unitPrice,
-      offerPrice: priceOnRequest ? null : unitPrice, // [TIER]
+      offerPrice: priceOnRequest ? null : unitPrice,
       quantity: line.quantity,
-      lineTotal: priceOnRequest ? null : round2(unitPrice * line.quantity), // [TIER]
+      lineTotal: priceOnRequest ? null : round2(unitPrice * line.quantity),
     });
   }
 
-  // ---------- kono line fail korle shob decrement rollback ----------
   if (outOfStockLines.length > 0) {
     await rollbackLines(decrementedLines);
     return { success: false, storeId, code: "OUT_OF_STOCK", outOfStockLines };
   }
 
-  // [BOOKING LIMIT] stock thik thakle booking slot reserve (preview te reserve hoy na)
   let reservedBookingProductIds = [];
   if (hasService && !dryRun) {
     const slot = await reserveBookingSlots({
@@ -749,10 +860,8 @@ const attemptStoreCheckout = async ({
     reservedBookingProductIds = slot.reserved;
   }
 
-  // [GST] proti item e GST calculate, tarpor totals
   const gstItems = orderItems.map((i) => applyGstToItem(i, gstMode));
 
-  // [QUOTE] price-less item totals e dhora hoy na
   const {
     totalItems,
     totalMrp,
@@ -769,12 +878,8 @@ const attemptStoreCheckout = async ({
     ? "AWAITING_QUOTE"
     : "NOT_REQUIRED";
 
-  // [SHIPPING] items payable dhore order value rule (eto taka er upor free ityadi) chalano,
-  // tarpor items + shipping = customer er total payable (PayU eta-i nibe)
   const itemsTotal = totalAmount;
 
-  // product / service alada subtotal (price x quantity, GST soho).
-  // proti type nijer rule e check hoy, tai cart e mix thakleo thik kaj kore
   const totalsByType = {};
   for (const i of gstItems) {
     const type =
@@ -787,16 +892,14 @@ const attemptStoreCheckout = async ({
     );
   }
 
-  // [FASTEST] free by rules + fastest ON -> fixed fastest fee, otherwise normal / fastest courier rate
   const shippingInfo = finalizeShipping(delivery, totalsByType, "PRODUCT", {
     fastest: wantsFastest,
-  }); // delivery off hole null
+  });
   const shippingCharge = round2(shippingInfo?.shippingCharge || 0);
   const grandTotal = round2(itemsTotal + shippingCharge);
 
   // ---------- preview: order create / stock minus na kore hishab ferot ----------
   if (dryRun) {
-    // [FASTEST] show both prices so the app can render the fastest toggle
     let fastestOption = { available: false };
     if (shippingInfo && delivery.info?.mode !== "LOCAL") {
       const otherDelivery = await checkStoreDelivery({
@@ -857,70 +960,97 @@ const attemptStoreCheckout = async ({
     };
   }
 
-  // [PAYMENT] ONLINE + price already fixed hole 30 min er payment window.
-  // Quote lagbe emon order e window shuru hoy user quote accept korle (respondToQuote),
-  // nahole quote asar age-i order auto-cancel hoye jabe.
-  const paymentExpiresAt =
-    effectiveMethod === "ONLINE" && priceStatus === "NOT_REQUIRED"
-      ? new Date(Date.now() + PAYMENT_WINDOW_MS)
-      : null;
-
   const isCourier = policy.hasDelivery && shippingInfo?.mode === "NATIONAL";
 
-  // ---------- order create fail korle stock ferot dao ----------
+  // order e ja ja jabe (COD hole sathe sathe, ONLINE hole payment success er por)
+  const orderPayload = {
+    userId,
+    storeId,
+    storeName: store.storeName,
+    storeUniqueId: store.storeUniqueId,
+    items: gstItems,
+    totalItems,
+    totalMrp,
+    discount,
+    gstMode,
+    subtotal,
+    totalTaxable,
+    totalCgst,
+    totalSgst,
+    totalIgst,
+    totalGst,
+    itemsTotal,
+    shippingCharge,
+    deliveryEnabled: policy.hasDelivery,
+    totalAmount: grandTotal,
+    priceStatus,
+    deliveryAddress,
+    deliveryInfo: shippingInfo,
+    parcel: policy.hasDelivery ? parcel : null,
+    pickupAddress,
+    note,
+    hasService,
+    bookingSlotProductIds: reservedBookingProductIds,
+    bookingDate: hasService && bookingDate ? toDeliveryDate(bookingDate) : null,
+    paymentMethod: effectiveMethod,
+    paymentOff,
+    paymentStatus: "PENDING",
+    paymentExpiresAt: null,
+    status: "CONFIRMED",
+    statusHistory: [
+      {
+        status: "CONFIRMED",
+        changedBy: userId,
+        note: "Order placed",
+        at: new Date(),
+      },
+    ],
+    autoShip: isCourier,
+    shipStartDate:
+      hasService && bookingDate ? toDeliveryDate(bookingDate) : new Date(),
+    expectedDeliveryDate: shippingInfo?.estimatedMaxDate || null,
+  };
+
+  // ---------- [ONLINE] payment age, order pore ----------
+  // price fixed + online + payment on hole order toiri hobe na, shudhu session
+  const requiresUpfrontPayment =
+    effectiveMethod === "ONLINE" &&
+    !paymentOff &&
+    priceStatus === "NOT_REQUIRED";
+
+  if (requiresUpfrontPayment) {
+    let session;
+    try {
+      session = await CheckoutSessionModel.create({
+        userId,
+        storeId,
+        storeName: store.storeName,
+        amount: grandTotal,
+        itemsTotal,
+        shippingCharge,
+        orderPayload,
+        stockLines: decrementedLines,
+        bookingSlotProductIds: reservedBookingProductIds,
+        bookingYmd: hasService && bookingDate ? bookingDate : null,
+        cartId: cart?.cartId || null,
+        cartItemIds: cart?.itemIds || [],
+        expiresAt: new Date(Date.now() + PAYMENT_WINDOW_MS),
+      });
+    } catch (err) {
+      await rollbackLines(decrementedLines);
+      await releaseBookingSlots(
+        reservedBookingProductIds,
+        hasService && bookingDate ? bookingDate : null,
+      );
+      throw err;
+    }
+    return { success: true, storeId, requiresPayment: true, session };
+  }
+
+  // ---------- COD / paymentOff / quote order: ager moto sathe sathe order ----------
   let order;
   try {
-    order = await OrderModel.create({
-      userId,
-      storeId,
-      storeName: store.storeName,
-      storeUniqueId: store.storeUniqueId,
-      items: gstItems,
-      totalItems,
-      totalMrp,
-      discount,
-      gstMode,
-      subtotal,
-      totalTaxable,
-      totalCgst,
-      totalSgst,
-      totalIgst,
-      totalGst,
-      itemsTotal, // items er payable (GST soho), shipping baad
-      shippingCharge,
-      deliveryEnabled: policy.hasDelivery,
-      totalAmount: grandTotal, // payable (GST + shipping soho)
-      priceStatus,
-      deliveryAddress,
-      deliveryInfo: shippingInfo,
-      parcel: policy.hasDelivery ? parcel : null,
-      pickupAddress,
-      note,
-      hasService,
-      bookingSlotProductIds: reservedBookingProductIds,
-      bookingDate:
-        hasService && bookingDate ? toDeliveryDate(bookingDate) : null,
-      paymentMethod: effectiveMethod,
-      paymentOff,
-      paymentStatus: "PENDING",
-      paymentExpiresAt,
-
-      status: "CONFIRMED",
-      statusHistory: [
-        {
-          status: "CONFIRMED",
-          changedBy: userId,
-          note: "Order placed",
-          at: new Date(),
-        },
-      ],
-
-      autoShip: isCourier,
-      // booking date thakle oi din theke, nahole ekhoni
-      shipStartDate:
-        hasService && bookingDate ? toDeliveryDate(bookingDate) : new Date(),
-      expectedDeliveryDate: shippingInfo?.estimatedMaxDate || null,
-    });
+    order = await OrderModel.create(orderPayload);
   } catch (err) {
     await rollbackLines(decrementedLines);
     await releaseBookingSlots(
@@ -930,25 +1060,7 @@ const attemptStoreCheckout = async ({
     throw err;
   }
 
-  // ---------- order confirm hoyeche, ekhon SALE log koro ----------
-  // [STOCK] decrementedLines e shudhu stock managed line ache, tai off product skip hoy
-  await Promise.all(
-    decrementedLines.map((l) =>
-      logStockChange({
-        productId: l.productId,
-        storeId: l.storeId,
-        userId,
-        variantId: l.variantId,
-        sizeVariantId: l.sizeVariantId,
-        productName: l.productName,
-        variantLabel: l.variantLabel,
-        type: "OUT",
-        reason: "SALE",
-        previousStock: l.newStock + l.quantity,
-        newStock: l.newStock,
-      }),
-    ),
-  );
+  await logSaleLines(decrementedLines, userId);
 
   return { success: true, storeId, order };
 };
@@ -1053,10 +1165,10 @@ const checkout = async (req, res) => {
       });
     }
 
-    // [PICKUP] store + pickup address wise group
     const groups = await groupLinesForCheckout(items);
 
     const createdOrders = [];
+    const paymentSessions = []; // [ONLINE] payment pending, order hoyni
     const failedStores = [];
     const successfulItemIds = [];
 
@@ -1068,12 +1180,16 @@ const checkout = async (req, res) => {
           lines: group.lines,
           deliveryAddress,
           note,
-          bookingDate: group.bookingDate, // [BOOKING] ei group er date
+          bookingDate: group.bookingDate,
           paymentMethod,
-          fastestDelivery, // [FASTEST]
+          fastestDelivery,
+          cart: { cartId, itemIds: group.itemIds },
         });
 
-        if (result.success) {
+        if (result.success && result.requiresPayment) {
+          // cart item payment success er por remove hobe
+          paymentSessions.push(result.session);
+        } else if (result.success) {
           createdOrders.push(result.order);
           successfulItemIds.push(...group.itemIds);
         } else {
@@ -1092,7 +1208,7 @@ const checkout = async (req, res) => {
       }
     }
 
-    // shudhu successful item gulo cart theke remove
+    // shudhu COD / direct order er item cart theke remove
     if (successfulItemIds.length > 0) {
       await CartModel.updateOne(
         { _id: cartId, userId },
@@ -1100,7 +1216,7 @@ const checkout = async (req, res) => {
       );
     }
 
-    if (createdOrders.length === 0) {
+    if (createdOrders.length === 0 && paymentSessions.length === 0) {
       return res.status(409).json({
         success: false,
         message: "Checkout failed for all stores",
@@ -1112,18 +1228,27 @@ const checkout = async (req, res) => {
     for (const order of createdOrders) {
       notifyNewOrder(order);
       notifyUserOrderStatus(order);
-      notifyPickupContact(order); // [MAIL]
+      notifyPickupContact(order);
       notifyInvoice(order);
-      kickOffShipment(order); // [AUTO SHIP]
+      kickOffShipment(order);
+    }
+
+    const paymentRequired = paymentSessions.length > 0;
+    let message = "Order(s) placed successfully";
+    if (paymentRequired) {
+      message =
+        "Complete the payment to place your order. Items are held for 30 minutes";
+    }
+    if (failedStores.length > 0) {
+      message = "Some stores could not be completed. " + message;
     }
 
     return res.status(201).json({
       success: true,
-      message:
-        failedStores.length > 0
-          ? "Order placed for some stores; others could not be completed"
-          : "Order(s) placed successfully",
-      orders: createdOrders.map(publicOrder), // [PICKUP]
+      message,
+      orders: createdOrders.map(publicOrder),
+      paymentRequired,
+      paymentSessions: paymentSessions.map(publicSession),
       failedStores: failedStores.length > 0 ? failedStores : undefined,
       unavailableItems: dead.length ? unavailableItems : undefined,
     });
@@ -1163,9 +1288,9 @@ const buyNow = async (req, res) => {
       lines: [{ productId, variantId: cleanVariantId(variantId), quantity }],
       deliveryAddress,
       note,
-      bookingDate, // [BOOKING]
+      bookingDate,
       paymentMethod,
-      fastestDelivery, // [FASTEST]
+      fastestDelivery,
     });
 
     if (!result.success) {
@@ -1173,6 +1298,17 @@ const buyNow = async (req, res) => {
         success: false,
         message: result.message || "This item is out of stock",
         outOfStockLines: result.outOfStockLines,
+      });
+    }
+
+    // [ONLINE] payment na hole order nai
+    if (result.requiresPayment) {
+      return res.status(201).json({
+        success: true,
+        paymentRequired: true,
+        message:
+          "Complete the payment to place your order. Item is held for 30 minutes",
+        session: publicSession(result.session),
       });
     }
 
@@ -1184,6 +1320,7 @@ const buyNow = async (req, res) => {
 
     return res.status(201).json({
       success: true,
+      paymentRequired: false,
       message: "Order placed successfully",
       order: publicOrder(result.order),
     });
@@ -2599,4 +2736,8 @@ module.exports = {
   getShippingOptions,
   selectShippingOption,
   notifyPickupContact,
+  publicSession,
+  releaseSessionHolds,
+  finalizeSessionOrder,
+  notifyOrderPlaced,
 };
