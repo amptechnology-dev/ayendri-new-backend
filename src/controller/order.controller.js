@@ -233,8 +233,60 @@ const cancelCourier = async (order) => {
   }
 };
 
+const COURIER_PICKED_UP_KEYWORDS = [
+  "PICKED UP",
+  "IN TRANSIT",
+  "SHIPPED",
+  "REACHED",
+  "HUB",
+  "OUT FOR DELIVERY",
+  "DELIVERED", // UNDELIVERED o dhorbe
+  "RTO",
+  "LOST",
+  "DAMAGED",
+  "MISROUTED",
+];
+
+const normShipStatus = (s) =>
+  String(s || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, " ")
+    .trim();
+
+const courierPickedUp = (shipment) => {
+  if (!shipment) return false;
+  const statuses = [
+    shipment.status,
+    ...(shipment.events || []).map((e) => e?.status),
+  ];
+  return statuses.some((s) => {
+    const n = normShipStatus(s);
+    return n && COURIER_PICKED_UP_KEYWORDS.some((k) => n.includes(k));
+  });
+};
+
+const getProductCancelEligibility = (o) => {
+  if (!["PENDING", "CONFIRMED"].includes(o.status)) {
+    return {
+      ok: false,
+      message: `Order cannot be cancelled once it is ${o.status}`,
+    };
+  }
+  if (courierPickedUp(o.shipment)) {
+    return {
+      ok: false,
+      message:
+        "The courier has already picked up this order, so it can no longer be cancelled",
+    };
+  }
+  return { ok: true };
+};
+
+const resolveCancelEligibility = (o) =>
+  o?.hasService ? getCancelEligibility(o) : getProductCancelEligibility(o);
+
 const withCancelInfo = (o) => {
-  const e = getCancelEligibility(o);
+  const e = resolveCancelEligibility(o); // <-- আগে getCancelEligibility(o) ছিল
   return {
     ...o,
     items: (o.items || []).map((i) => ({
@@ -1504,10 +1556,7 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    // [CANCEL RULE]
-    //  SERVICE : booking date er ager din bikel 4 ta porjonto
-    //  PRODUCT : courier pickup er age porjonto + (paid hole) refundDays er moddhe
-    const eligibility = getCancelEligibility(existing);
+    const eligibility = resolveCancelEligibility(existing);
     if (!eligibility.ok) {
       return res.status(400).json({
         success: false,
@@ -1552,48 +1601,61 @@ const cancelMyOrder = async (req, res) => {
       extra: { cancelReason: reason, cancelledBy: "USER", autoShip: false },
     });
 
-    if (!order) {
+        if (!order) {
       return res.status(409).json({
         success: false,
         message: "Order status has just changed, please refresh",
       });
     }
 
-    let refundRequest = null;
-    if (wasPaid) {
-      refundRequest = await OrderRequestModel.create({
-        orderId: order._id,
-        orderNumber: order.orderNumber,
-        itemId: null,
-        itemName: `Order ${order.orderNumber}`,
-        quantity: order.totalItems,
-        userId,
-        storeId: order.storeId,
-        type: "REFUND",
-        source: "ORDER_CANCEL",
-        reasonCode: "ORDER_CANCELLED",
-        reason,
-        status: "APPROVED",
-        decidedAt: new Date(),
-        storeNote:
-          "Refund approved automatically because the order was cancelled",
-        refundAmount: order.totalAmount,
-        bankDetails,
-      });
-    }
-
+    // stock + booking slot age ferot (refund request fail korleo jeno stock ferot jay)
     notifyOrderCancelled(order);
     notifyPickupCancelled(order);
     notifyUserOrderStatus(order);
     await restoreOrderStock(order, userId);
 
+    let refundRequest = null;
+    let refundError = false;
+    if (wasPaid) {
+      try {
+        refundRequest = await OrderRequestModel.create({
+          orderId: order._id,
+          orderNumber: order.orderNumber,
+          itemId: null,
+          itemName: `Order ${order.orderNumber}`,
+          quantity: order.totalItems,
+          userId,
+          storeId: order.storeId,
+          type: "REFUND",
+          source: "ORDER_CANCEL",
+          reasonCode: "ORDER_CANCELLED",
+          reason,
+          status: "APPROVED",
+          decidedAt: new Date(),
+          storeNote:
+            "Refund approved automatically because the order was cancelled",
+          refundAmount: order.totalAmount,
+          bankDetails,
+        });
+      } catch (err) {
+        refundError = true;
+        console.error(
+          `REFUND REQUEST CREATE FAILED order=${order._id}:`,
+          err.message,
+        );
+      }
+    }
+
     return res.status(200).json({
       success: true,
-      message: wasPaid
-        ? "Order cancelled. Your refund will be sent to your bank account by the store"
-        : "Order cancelled and stock restored",
+      message: !wasPaid
+        ? "Order cancelled and stock restored"
+        : refundError
+          ? "Order cancelled. We could not create your refund request automatically, please contact support"
+          : "Order cancelled. Your refund will be sent to your bank account by the store",
       order,
       refundRequestId: refundRequest?._id || null,
+      refundPending: refundError || undefined,
     });
   } catch (error) {
     return handleError(res, error, "Cancel My Order Error");
