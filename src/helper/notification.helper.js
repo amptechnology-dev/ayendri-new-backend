@@ -381,6 +381,46 @@ const notifyUserReviewReply = async ({ product, review }) => {
   }
 };
 
+// customer ke ticket er notification (bell + push)
+const notifyUserTicket = async ({ userId, ticket, type, title, body }) => {
+  try {
+    if (!userId) return;
+    await NotificationModel.create({
+      userId,
+      type,
+      title,
+      body,
+      ticketId: ticket._id,
+    });
+    await sendPushToOwner({
+      Model: UserModel,
+      ownerId: userId,
+      title,
+      body,
+      data: { type, ticketId: String(ticket._id), ticketNo: String(ticket.ticketNo) },
+    });
+  } catch (err) {
+    console.error("notifyUserTicket error:", err);
+  }
+};
+
+// store ke chat related notification (agent request)
+const notifyStoreChat = async ({ storeId, conversationId, type, title, body }) => {
+  try {
+    if (!storeId) return;
+    await NotificationModel.create({ storeId, type, title, body, conversationId });
+    await sendPushToOwner({
+      Model: StoreModel,
+      ownerId: storeId,
+      title,
+      body,
+      data: { type, conversationId: String(conversationId || "") },
+    });
+  } catch (err) {
+    console.error("notifyStoreChat error:", err);
+  }
+};
+
 // offerBanner: true hole shudhu jara ei store visit korechhe (role USER, active) tara pabe
 const notifyUsersNewOffer = async (banner) => {
   try {
@@ -452,4 +492,6 @@ module.exports = {
   notifyUsersNewOffer,
   notifyStoreNewReview,
   notifyUserReviewReply, 
+  notifyUserTicket,
+  notifyStoreChat
 };

@@ -13,6 +13,10 @@ const NOTIFICATION_TYPES = [
   "NEW_OFFER",
   "PRICE_QUOTED",
   "REVIEW_REPLY",
+  // chat / ticket
+  "AGENT_REQUESTED",
+  "TICKET_RAISED",
+  "TICKET_UPDATED",
 ];
 
 const notificationSchema = new mongoose.Schema(
@@ -40,7 +44,11 @@ const notificationSchema = new mongoose.Schema(
     reviewId: { type: mongoose.Schema.Types.ObjectId },
     // NEW_OFFER notification er jonno
     bannerId: { type: mongoose.Schema.Types.ObjectId, ref: "Banner" },
-    // notification e dekhanor media (banner er image / gif / video)
+    ticketId: { type: mongoose.Schema.Types.ObjectId, ref: "Ticket" },
+    conversationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ChatConversation",
+    },
     mediaUrl: { type: String, default: null },
     mediaType: { type: String, enum: ["image", "video", null], default: null },
     isRead: { type: Boolean, default: false },

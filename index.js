@@ -4,7 +4,9 @@ const path = require("path");
 const cors = require("cors");
 const Conect = require("./src/db/Connent.js");
 const cookieParser = require("cookie-parser");
-const { expireUnpaidOrders } = require("./src/controller/payment.controller.js");
+const {
+  expireUnpaidOrders,
+} = require("./src/controller/payment.controller.js");
 const { processDueShipments } = require("./src/helper/fulfilment.js");
 
 dotenv.config();
@@ -36,7 +38,7 @@ app.get("/.well-known/assetlinks.json", (req, res) => {
       relation: ["delegate_permission/common.handle_all_urls"],
       target: {
         namespace: "android_app",
-        package_name: process.env.ANDROID_PACKAGE_NAME, 
+        package_name: process.env.ANDROID_PACKAGE_NAME,
         sha256_cert_fingerprints: fingerprints,
       },
     },
@@ -68,15 +70,15 @@ const storeSettingRoutes = require("./src/routes/storeSetting.routes.js");
 const workerRoutes = require("./src/routes/worker.routes.js");
 const stockRoutes = require("./src/routes/stock.routes.js");
 const companyRoutes = require("./src/routes/company.routes.js");
-const storeVisitRoutes = require("./src/routes/storeVisit.route.js")
+const storeVisitRoutes = require("./src/routes/storeVisit.route.js");
 const appReleaseRoutes = require("./src/routes/appRelease.route.js");
 const installRoutes = require("./src/routes/install.routes.js");
 const paymentRoutes = require("./src/routes/payment.routes.js");
 const deliveryRoutes = require("./src/routes/delivery.routes.js");
 const termsConditionRoutes = require("./src/routes/termsCondition.route.js");
-const reportRoutes = require("./src/routes/report.route.js")
-const chatBoatRoutes = require("./src/routes/chatbot.route.js")
-
+const reportRoutes = require("./src/routes/report.route.js");
+const chatBoatRoutes = require("./src/routes/chatbot.route.js");
+const ticketRoutes = require("./src/routes/ticket.route.js");
 
 app.use("/api/register", registerRoutes);
 app.use("/api/login", loginRoutes);
@@ -94,23 +96,27 @@ app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/banner", bannerRoutes);
 app.use("/api/wishlist", wishlistRoutes);
 app.use("/api/product", productreviewRoutes);
-app.use("/api/notifications",notificationRoutes);
+app.use("/api/notifications", notificationRoutes);
 app.use("/api/store-settings", storeSettingRoutes);
 app.use("/api/worker", workerRoutes);
 app.use("/api/stock", stockRoutes);
 app.use("/api/company", companyRoutes);
-app.use("/api/store-visit",storeVisitRoutes)
+app.use("/api/store-visit", storeVisitRoutes);
 app.use("/api/app-release", appReleaseRoutes);
 app.use("/api/install", installRoutes);
 app.use("/api/payment", paymentRoutes);
 app.use("/api/delivery", deliveryRoutes);
 app.use("/api/terms-conditions", termsConditionRoutes);
-app.use("/api/report",reportRoutes)
-app.use("/api/chatbot",chatBoatRoutes)
+app.use("/api/report", reportRoutes);
+app.use("/api/chatbot", chatBoatRoutes);
+app.use("/api/ticket", ticketRoutes);
 
-setInterval(() => {
-  expireUnpaidOrders().catch((e) => console.error("Expire orders error:", e));
-}, 5 * 60 * 1000);
+setInterval(
+  () => {
+    expireUnpaidOrders().catch((e) => console.error("Expire orders error:", e));
+  },
+  5 * 60 * 1000,
+);
 
 // Temporary off due to shiprocket off
 // setInterval(
