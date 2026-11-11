@@ -14,6 +14,7 @@ const objectId = z.string().refine((v) => mongoose.isValidObjectId(v), "Invalid 
 
 const createSchema = z.object({
   conversationId: objectId,
+  orderId: objectId.optional(),
   subject: z.string().trim().min(3, "Subject is required").max(150),
   description: z.string().trim().min(5, "Describe the complaint").max(2000),
 });

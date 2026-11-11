@@ -1,3 +1,4 @@
+const OrderModel = require("../model/order.model.js");
 const mongoose = require("mongoose");
 const ChatbotFaqModel = require("../model/chatbot.model.js");
 const ChatConversationModel = require("../model/chatConversation.model.js");
@@ -19,6 +20,16 @@ const httpError = (status, message) => {
 };
 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// link the order the customer picked (must exist, and belong to the chat's store)
+const linkOrder = async (conv, orderId) => {
+  if (!orderId || String(conv.orderId || "") === String(orderId)) return;
+  const ok = await OrderModel.exists({
+    _id: orderId,
+    ...(conv.storeId ? { storeId: conv.storeId } : {}),
+  });
+  if (ok) conv.orderId = orderId;
+};
 
 const getOwnedStoreIds = async (userId) => {
   const stores = await StoreModel.find({ userId }).select("_id").lean();
@@ -51,6 +62,7 @@ const getChatReply = async ({
   name,
   phoneNumber,
   storeId,
+  orderId,
   resumeBot,
 }) => {
   let conversation = await ChatConversationModel.findOne({ sessionId });
@@ -80,6 +92,8 @@ const getChatReply = async ({
       conversation.storeId = storeId;
     }
   }
+
+  await linkOrder(conversation, orderId);
 
   // NEW: user "Talk with Assistant" chaple bot abar on
   if (resumeBot && conversation.mode === "human") {
@@ -185,7 +199,7 @@ const assertStoreOwner = async (storeId, userId) => {
 };
 
 // ===================== USER: REQUEST CUSTOMER SERVICE (AGENT) =====================
-const requestAgent = async ({ sessionId, name, phoneNumber, storeId }) => {
+const requestAgent = async ({ sessionId, name, phoneNumber, storeId, orderId }) => {
   let conv = await ChatConversationModel.findOne({ sessionId });
 
   if (!conv) {
@@ -198,6 +212,8 @@ const requestAgent = async ({ sessionId, name, phoneNumber, storeId }) => {
   if (!conv.storeId) {
     throw httpError(400, "Customer service is not available right now.");
   }
+
+  await linkOrder(conv, orderId);
 
   // agent already chat e ache
   if (conv.mode === "human") {

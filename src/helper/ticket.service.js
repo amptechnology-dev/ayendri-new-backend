@@ -1,3 +1,5 @@
+const OrderModel = require("../model/order.model.js");
+
 const { randomInt } = require("crypto");
 const TicketModel = require("../model/ticket.model.js");
 const ChatConversationModel = require("../model/chatConversation.model.js");
@@ -78,7 +80,7 @@ const postChatNote = async (conv, content, senderId) => {
 // ===================== STORE / SUPPORT =====================
 const createTicket = async (
   userId,
-  { conversationId, subject, description },
+  { conversationId, orderId, subject, description },
 ) => {
   const conv = await ChatConversationModel.findById(conversationId);
   if (!conv) throw httpError(404, "Conversation not found");
@@ -96,7 +98,15 @@ const createTicket = async (
   const phoneKey = toPhoneKey(conv.phoneNumber);
   const user = await findUserByPhoneKey(phoneKey);
 
+  const finalOrderId = orderId || conv.orderId || null;
+
+  if (finalOrderId) {
+    const ok = await OrderModel.exists({ _id: finalOrderId, storeId: conv.storeId });
+    if (!ok) throw httpError(400, "Order not found for this store");
+  }
+
   const ticket = await TicketModel.create({
+    orderId: finalOrderId,
     ticketNo: await generateTicketNo(),
     conversation: conv._id,
     storeId: conv.storeId,
@@ -243,7 +253,20 @@ const getMyTicket = async (id, userId, phoneKey) => {
     .sort({ createdAt: 1 })
     .select("role content createdAt")
     .lean();
-  return { ticket, messages };
+
+  let orderId = ticket.orderId;
+  if (!orderId) {
+    const conv = await ChatConversationModel.findById(ticket.conversation)
+      .select("orderId")
+      .lean();
+    orderId = conv?.orderId || null;
+  }
+  let order = null;
+  if (orderId) {
+    order = await OrderModel.findOne({ _id: orderId, userId }).lean();
+    console.log("[ticket] orderId:", orderId, "found:", !!order);
+  }
+  return { ticket, messages, order };
 };
 
 module.exports = {

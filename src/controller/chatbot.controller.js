@@ -13,6 +13,7 @@ const chatSchema = z.object({
   name: z.string().trim().max(100).optional(),
   phoneNumber: z.string().trim().max(20).optional(),
   storeId: objectId.optional(),
+  orderId: objectId.optional(),
   resumeBot: z.boolean().optional(),
 });
 
@@ -21,6 +22,7 @@ const requestAgentSchema = z.object({
   name: z.string().trim().max(100).optional(),
   phoneNumber: z.string().trim().max(20).optional(),
   storeId: objectId.optional(),
+  orderId: objectId.optional(),
 });
 
 const faqSchema = z.object({

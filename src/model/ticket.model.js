@@ -45,6 +45,13 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    // order this complaint is about (optional)
+    orderId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Order",
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true },
 );
