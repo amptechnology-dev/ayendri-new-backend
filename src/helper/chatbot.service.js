@@ -12,6 +12,9 @@ const {
 const { notifyStoreChat } = require("./notification.helper.js");
 
 const AI_FAIL_TEXT = "Sorry, AI is unavailable right now.";
+// OrderModel already import kora ache
+const ORDER_FIELDS =
+  "orderNumber status totalAmount totalItems items deliveryAddress paymentMethod paymentStatus priceStatus quote createdAt storeId";
 
 const httpError = (status, message) => {
   const err = new Error(message);
@@ -199,14 +202,28 @@ const assertStoreOwner = async (storeId, userId) => {
 };
 
 // ===================== USER: REQUEST CUSTOMER SERVICE (AGENT) =====================
-const requestAgent = async ({ sessionId, name, phoneNumber, storeId, orderId }) => {
+const requestAgent = async ({
+  sessionId,
+  name,
+  phoneNumber,
+  storeId,
+  orderId,
+}) => {
   let conv = await ChatConversationModel.findOne({ sessionId });
 
   if (!conv) {
     if (!name || !phoneNumber) {
-      throw httpError(400, "Name and phone number are required to start a new conversation.");
+      throw httpError(
+        400,
+        "Name and phone number are required to start a new conversation.",
+      );
     }
-    conv = new ChatConversationModel({ sessionId, name, phoneNumber, storeId: storeId || null });
+    conv = new ChatConversationModel({
+      sessionId,
+      name,
+      phoneNumber,
+      storeId: storeId || null,
+    });
   }
   if (!conv.storeId && storeId) conv.storeId = storeId;
   if (!conv.storeId) {
@@ -217,7 +234,12 @@ const requestAgent = async ({ sessionId, name, phoneNumber, storeId, orderId }) 
 
   // agent already chat e ache
   if (conv.mode === "human") {
-    return { mode: "human", humanRequested: false, sessionId: conv.sessionId, reply: null };
+    return {
+      mode: "human",
+      humanRequested: false,
+      sessionId: conv.sessionId,
+      reply: null,
+    };
   }
 
   const first = !conv.humanRequested;
@@ -232,7 +254,11 @@ const requestAgent = async ({ sessionId, name, phoneNumber, storeId, orderId }) 
     "Your request has been sent to AYENDRI Help Center. An agent will join this chat shortly. Meanwhile I'm happy to help. 🙏";
 
   if (first) {
-    await ChatMessageModel.create({ conversation: conv._id, role: "assistant", content: reply });
+    await ChatMessageModel.create({
+      conversation: conv._id,
+      role: "assistant",
+      content: reply,
+    });
     notifyStoreChat({
       storeId: conv.storeId,
       conversationId: conv._id,
@@ -255,7 +281,8 @@ const pollConversation = async (sessionId, after) => {
   const conversation = await ChatConversationModel.findOne({ sessionId })
     .select("_id mode humanRequested")
     .lean();
-  if (!conversation) return { mode: "bot", humanRequested: false, serverTime, messages: [] };
+  if (!conversation)
+    return { mode: "bot", humanRequested: false, serverTime, messages: [] };
 
   let messages = [];
   const afterDate = after ? new Date(after) : null;
@@ -314,6 +341,7 @@ const listConversations = async ({
   const [conversations, total, unreadTotal] = await Promise.all([
     ChatConversationModel.find(match)
       .populate("storeId", "storeName")
+      .populate("orderId", "orderNumber status")
       .sort({ lastMessageAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
@@ -334,10 +362,13 @@ const getConversationMessages = async (id, userId) => {
     conv.unreadByStore = 0;
     await conv.save();
   }
-  const messages = await ChatMessageModel.find({ conversation: conv._id })
-    .sort({ createdAt: 1 })
-    .lean();
-  return { conversation: conv.toObject(), messages };
+  const [messages, order] = await Promise.all([
+    ChatMessageModel.find({ conversation: conv._id }).sort({ createdAt: 1 }).lean(),
+    conv.orderId
+      ? OrderModel.findOne({ _id: conv.orderId, storeId: conv.storeId }).select(ORDER_FIELDS).lean()
+      : null,
+  ]);
+  return { conversation: conv.toObject(), messages, order };
 };
 
 const sendStoreMessage = async (id, userId, content) => {
@@ -447,5 +478,5 @@ module.exports = {
   getConversationMessages,
   sendStoreMessage,
   updateConversationState,
-  requestAgent
+  requestAgent,
 };

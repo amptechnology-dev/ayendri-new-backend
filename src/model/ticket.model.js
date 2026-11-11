@@ -52,6 +52,7 @@ const ticketSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    orderNumber: { type: String, default: "" },
   },
   { timestamps: true },
 );

@@ -1,15 +1,18 @@
-const OrderModel = require("../model/order.model.js");
-
 const { randomInt } = require("crypto");
 const TicketModel = require("../model/ticket.model.js");
 const ChatConversationModel = require("../model/chatConversation.model.js");
 const ChatMessageModel = require("../model/chatMessage.model.js");
 const StoreModel = require("../model/store.model.js");
+const OrderModel = require("../model/order.model.js");
 const UserModel = require("../model/user.model.js");
 const { notifyUserTicket } = require("./notification.helper.js");
 
 const STATUSES = ["open", "in_progress", "resolved", "closed"];
-const ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"; // 0/O, 1/I confusing char nai
+const ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+// order er ja ja dekhabo (pickupAddress kokhono na)
+const ORDER_FIELDS =
+  "orderNumber status totalAmount totalItems items deliveryAddress paymentMethod paymentStatus priceStatus quote createdAt userId storeId";
 
 const httpError = (status, message) => {
   const err = new Error(message);
@@ -18,17 +21,11 @@ const httpError = (status, message) => {
 };
 
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const toPhoneKey = (p) =>
-  String(p || "")
-    .replace(/\D/g, "")
-    .slice(-10);
+const toPhoneKey = (p) => String(p || "").replace(/\D/g, "").slice(-10);
 
 const generateTicketNo = async () => {
   for (let i = 0; i < 10; i++) {
-    const no = Array.from(
-      { length: 5 },
-      () => ALPHABET[randomInt(ALPHABET.length)],
-    ).join("");
+    const no = Array.from({ length: 5 }, () => ALPHABET[randomInt(ALPHABET.length)]).join("");
     if (!(await TicketModel.exists({ ticketNo: no }))) return no;
   }
   throw httpError(500, "Could not generate ticket number");
@@ -44,7 +41,6 @@ const getOwnedStoreIds = async (userId) => {
   return stores.map((s) => s._id);
 };
 
-// chat e deya phone er last 10 digit diye customer account khuje ber kore
 const findUserByPhoneKey = async (phoneKey) => {
   if (!phoneKey) return null;
   return UserModel.findOne({ role: "USER", phone: new RegExp(`${phoneKey}$`) })
@@ -57,60 +53,51 @@ const notifyCustomer = async (ticket, type, title, body) => {
   if (!userId) {
     const user = await findUserByPhoneKey(ticket.phoneKey);
     userId = user?._id;
-    if (userId)
-      await TicketModel.updateOne({ _id: ticket._id }, { $set: { userId } });
+    if (userId) await TicketModel.updateOne({ _id: ticket._id }, { $set: { userId } });
   }
-  if (!userId) return; // customer er account nai, shudhu chat e message jabe
+  if (!userId) return;
   await notifyUserTicket({ userId, ticket, type, title, body });
 };
 
-// ticket er update customer er chat e dekhabe (widget e "AYENDRI Help Center" hishebe)
 const postChatNote = async (conv, content, senderId) => {
-  await ChatMessageModel.create({
-    conversation: conv._id,
-    role: "store",
-    content,
-    senderId,
-  });
+  await ChatMessageModel.create({ conversation: conv._id, role: "store", content, senderId });
   conv.lastMessageAt = new Date();
   conv.lastMessagePreview = content.slice(0, 120);
   await conv.save();
 };
 
 // ===================== STORE / SUPPORT =====================
-const createTicket = async (
-  userId,
-  { conversationId, orderId, subject, description },
-) => {
+const createTicket = async (userId, { conversationId, orderId, subject, description }) => {
   const conv = await ChatConversationModel.findById(conversationId);
   if (!conv) throw httpError(404, "Conversation not found");
-  if (!conv.storeId)
-    throw httpError(403, "Not authorized for this conversation");
+  if (!conv.storeId) throw httpError(403, "Not authorized for this conversation");
   await assertStoreOwner(conv.storeId, userId);
 
   const existing = await TicketModel.exists({
     conversation: conv._id,
     status: { $in: ["open", "in_progress"] },
   });
-  if (existing)
-    throw httpError(409, "An open ticket already exists for this chat");
+  if (existing) throw httpError(409, "An open ticket already exists for this chat");
+
+  // order: body theke, na hole chat e customer je order select korechhe
+  let order = null;
+  const wantedOrderId = orderId || conv.orderId;
+  if (wantedOrderId) {
+    order = await OrderModel.findOne({ _id: wantedOrderId, storeId: conv.storeId })
+      .select("_id orderNumber")
+      .lean();
+  }
 
   const phoneKey = toPhoneKey(conv.phoneNumber);
   const user = await findUserByPhoneKey(phoneKey);
 
-  const finalOrderId = orderId || conv.orderId || null;
-
-  if (finalOrderId) {
-    const ok = await OrderModel.exists({ _id: finalOrderId, storeId: conv.storeId });
-    if (!ok) throw httpError(400, "Order not found for this store");
-  }
-
   const ticket = await TicketModel.create({
-    orderId: finalOrderId,
     ticketNo: await generateTicketNo(),
     conversation: conv._id,
     storeId: conv.storeId,
     userId: user?._id || null,
+    orderId: order?._id || null,
+    orderNumber: order ? String(order.orderNumber || "") : "",
     customerName: conv.name,
     phoneNumber: conv.phoneNumber,
     phoneKey,
@@ -120,16 +107,17 @@ const createTicket = async (
     unreadByUser: 1,
   });
 
+  const orderPart = ticket.orderNumber ? ` for order #${ticket.orderNumber}` : "";
   await postChatNote(
     conv,
-    `Ticket #${ticket.ticketNo} has been raised for your complaint. You can track it in Profile > My Tickets.`,
+    `Ticket #${ticket.ticketNo} has been raised${orderPart}. You can track it in Profile > My Tickets.`,
     userId,
   );
   await notifyCustomer(
     ticket,
     "TICKET_RAISED",
     `Ticket #${ticket.ticketNo} raised 🎫`,
-    `Your complaint "${subject}" has been registered. Track it in Profile > My Tickets.`,
+    `Your complaint "${subject}"${orderPart} has been registered. Track it in Profile > My Tickets.`,
   );
   return ticket;
 };
@@ -145,20 +133,14 @@ const listStoreTickets = async ({ userId, status, search, page, limit }) => {
       { customerName: rx },
       { phoneNumber: rx },
       { subject: rx },
+      { orderNumber: rx },
     ];
   }
 
   const [tickets, total, openCount] = await Promise.all([
-    TicketModel.find(match)
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean(),
+    TicketModel.find(match).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
     TicketModel.countDocuments(match),
-    TicketModel.countDocuments({
-      storeId: { $in: owned },
-      status: { $in: ["open", "in_progress"] },
-    }),
+    TicketModel.countDocuments({ storeId: { $in: owned }, status: { $in: ["open", "in_progress"] } }),
   ]);
   return { tickets, total, openCount };
 };
@@ -167,12 +149,14 @@ const getStoreTicket = async (id, userId) => {
   const ticket = await TicketModel.findById(id).lean();
   if (!ticket) throw httpError(404, "Ticket not found");
   await assertStoreOwner(ticket.storeId, userId);
-  const messages = await ChatMessageModel.find({
-    conversation: ticket.conversation,
-  })
-    .sort({ createdAt: 1 })
-    .lean();
-  return { ticket, messages };
+
+  const [messages, order] = await Promise.all([
+    ChatMessageModel.find({ conversation: ticket.conversation }).sort({ createdAt: 1 }).lean(),
+    ticket.orderId
+      ? OrderModel.findOne({ _id: ticket.orderId, storeId: ticket.storeId }).select(ORDER_FIELDS).lean()
+      : null,
+  ]);
+  return { ticket, messages, order };
 };
 
 const updateTicket = async (id, userId, { status, resolution }) => {
@@ -218,6 +202,7 @@ const updateTicket = async (id, userId, { status, resolution }) => {
   return ticket;
 };
 
+// ===================== CUSTOMER (My Tickets) =====================
 const myMatch = (userId, phoneKey) => ({
   $or: [{ userId }, ...(phoneKey ? [{ phoneKey }] : [])],
 });
@@ -249,23 +234,17 @@ const getMyTicket = async (id, userId, phoneKey) => {
     await TicketModel.updateOne({ _id: id }, { $set: { unreadByUser: 0 } });
     ticket.unreadByUser = 0;
   }
-  const messages = await ChatMessageModel.find({ conversation: ticket.conversation })
-    .sort({ createdAt: 1 })
-    .select("role content createdAt")
-    .lean();
 
-  let orderId = ticket.orderId;
-  if (!orderId) {
-    const conv = await ChatConversationModel.findById(ticket.conversation)
-      .select("orderId")
-      .lean();
-    orderId = conv?.orderId || null;
-  }
-  let order = null;
-  if (orderId) {
-    order = await OrderModel.findOne({ _id: orderId, userId }).lean();
-    console.log("[ticket] orderId:", orderId, "found:", !!order);
-  }
+  const [messages, order] = await Promise.all([
+    ChatMessageModel.find({ conversation: ticket.conversation })
+      .sort({ createdAt: 1 })
+      .select("role content createdAt")
+      .lean(),
+    // customer shudhu nijer order dekhbe
+    ticket.orderId
+      ? OrderModel.findOne({ _id: ticket.orderId, userId }).select(ORDER_FIELDS).lean()
+      : null,
+  ]);
   return { ticket, messages, order };
 };
 
