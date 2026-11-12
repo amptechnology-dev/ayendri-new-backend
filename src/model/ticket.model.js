@@ -7,7 +7,7 @@ const ticketSchema = new mongoose.Schema(
     conversation: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "ChatConversation",
-      required: true,
+      default: null,
       index: true,
     },
     storeId: {
@@ -53,6 +53,20 @@ const ticketSchema = new mongoose.Schema(
       index: true,
     },
     orderNumber: { type: String, default: "" },
+    images: { type: [String], default: [] },
+    createdBy: { type: String, enum: ["STORE", "USER"], default: "STORE" },
+    closedBy: { type: String, enum: ["STORE", "USER"], default: null },
+    feedback: {
+      type: new mongoose.Schema(
+        {
+          rating: { type: Number, min: 1, max: 5, required: true },
+          comment: { type: String, trim: true, maxlength: 1000, default: "" },
+          at: { type: Date, default: Date.now },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
   },
   { timestamps: true },
 );

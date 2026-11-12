@@ -11,7 +11,7 @@ const sendPasswordEmail = async (toEmail, password, userName) => {
     });
 
     const mailOptions = {
-      from: `"AMP Store Management" <${process.env.EMAIL_USER}>`,
+      from: `"Ayendri" <${process.env.EMAIL_USER}>`,
       to: toEmail,
       subject: "Your AMP Store Management Account Credentials",
       html: `

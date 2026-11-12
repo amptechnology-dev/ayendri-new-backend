@@ -17,6 +17,11 @@ const NOTIFICATION_TYPES = [
   "AGENT_REQUESTED",
   "TICKET_RAISED",
   "TICKET_UPDATED",
+   "AGENT_REQUESTED",
+  "TICKET_RAISED",
+  "TICKET_UPDATED",
+  "TICKET_RAISED_BY_USER",
+  "TICKET_CLOSED_BY_USER",
 ];
 
 const notificationSchema = new mongoose.Schema(

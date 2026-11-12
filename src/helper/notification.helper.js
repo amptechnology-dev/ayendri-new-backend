@@ -421,6 +421,32 @@ const notifyStoreChat = async ({ storeId, conversationId, type, title, body }) =
   }
 };
 
+const notifyStoreTicket = async ({ storeId, ticket, type, title, body }) => {
+  try {
+    if (!storeId) return;
+    await NotificationModel.create({
+      storeId,
+      type,
+      title,
+      body,
+      ticketId: ticket._id,
+    });
+    await sendPushToOwner({
+      Model: StoreModel,
+      ownerId: storeId,
+      title,
+      body,
+      data: {
+        type,
+        ticketId: String(ticket._id),
+        ticketNo: String(ticket.ticketNo),
+      },
+    });
+  } catch (err) {
+    console.error("notifyStoreTicket error:", err);
+  }
+};
+
 // offerBanner: true hole shudhu jara ei store visit korechhe (role USER, active) tara pabe
 const notifyUsersNewOffer = async (banner) => {
   try {
@@ -491,7 +517,8 @@ module.exports = {
   notifyStorePriceResponse,
   notifyUsersNewOffer,
   notifyStoreNewReview,
-  notifyUserReviewReply, 
+  notifyUserReviewReply,
   notifyUserTicket,
-  notifyStoreChat
+  notifyStoreChat,
+  notifyStoreTicket,
 };
