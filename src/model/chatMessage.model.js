@@ -7,6 +7,7 @@ const chatMessageSchema = new mongoose.Schema(
     role: { type: String, enum: ["user", "assistant", "store"], required: true }, 
     content: { type: String, required: true, trim: true },
     senderId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null }, 
+    canRaiseTicket: { type: Boolean, default: false }, 
   },
   { timestamps: true },
 );

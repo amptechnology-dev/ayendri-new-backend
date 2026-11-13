@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const { z } = require("zod");
 const ticketService = require("../helper/ticket.service");
 const UserModel = require("../model/user.model.js");
+const ChatConversationModel = require("../model/chatConversation.model.js");
 const getUserId = (req) => req.user?._id || req.user?.id;
 
 const getMe = async (req) => {
@@ -200,8 +201,31 @@ const myOrders = async (req, res) => {
 };
 
 const myCreate = async (req, res) => {
+  let unlocked = null;
   try {
-    const body = userCreateSchema.parse(stripEmpty(req.body));
+    // sessionId is not part of the ticket body, so take it out before zod
+    const { sessionId, ...rest } = stripEmpty(req.body);
+    const body = userCreateSchema.parse(rest);
+
+    // The bot unlocks ONE ticket per chat (ticketAllowed). Consume it atomically.
+    unlocked =
+      typeof sessionId === "string" &&
+      sessionId.length >= 8 &&
+      sessionId.length <= 64
+        ? await ChatConversationModel.findOneAndUpdate(
+            { sessionId, ticketAllowed: true },
+            { $set: { ticketAllowed: false } },
+          )
+        : null;
+
+    if (!unlocked) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Tickets can only be raised when our chat assistant offers it. Please chat with us first.",
+      });
+    }
+
     const ticket = await ticketService.createMyTicket(
       getUserId(req),
       body,
@@ -211,6 +235,13 @@ const myCreate = async (req, res) => {
       .status(201)
       .json({ success: true, message: "Ticket raised", ticket });
   } catch (error) {
+    // ticket was not created (bad order, upload error...), so give the unlock back
+    if (unlocked) {
+      await ChatConversationModel.updateOne(
+        { _id: unlocked._id },
+        { $set: { ticketAllowed: true } },
+      ).catch(() => {});
+    }
     return handleError(res, error, "Create My Ticket Error");
   }
 };

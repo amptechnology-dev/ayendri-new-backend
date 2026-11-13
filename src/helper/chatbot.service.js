@@ -12,6 +12,12 @@ const {
 const { notifyStoreChat } = require("./notification.helper.js");
 
 const AI_FAIL_TEXT = "Sorry, AI is unavailable right now.";
+const TICKET_RX = /\[\[\s*NEED[_\s-]?TICKET\s*\]\]/i;
+const TICKET_RX_ALL = new RegExp(TICKET_RX.source, "gi");
+
+// safety net: obvious complaints always get the button, even if the AI forgets the marker
+const COMPLAINT_RX =
+  /\b(damaged|broken|defective|wrong item|wrong product|not received|never received|fake|cheated|complaint|want (a )?refund|money back|raise (a )?ticket)\b/i;
 // OrderModel already import kora ache
 const ORDER_FIELDS =
   "orderNumber status totalAmount totalItems items deliveryAddress paymentMethod paymentStatus priceStatus quote createdAt storeId";
@@ -167,14 +173,28 @@ const getChatReply = async ({
   ]);
   const context = [baseContext, storeContext].filter(Boolean).join("\n");
 
-  const aiReply = await askAi(aiHistory, context);
+  const rawReply = await askAi(aiHistory, context);
+  console.log("RAW AI REPLY:", JSON.stringify(rawReply)); // remove after testing
+  const failed = rawReply === AI_FAIL_TEXT;
+  const canRaiseTicket =
+    !failed && (TICKET_RX.test(rawReply) || COMPLAINT_RX.test(message));
+  const aiReply = failed
+    ? rawReply
+    : rawReply.replace(TICKET_RX_ALL, "").trim() ||
+      "I'm sorry, I couldn't resolve this. You can raise a ticket and our team will help you.";
 
-  if (aiReply !== AI_FAIL_TEXT) {
+  if (!failed) {
     await ChatMessageModel.create({
       conversation: conversation._id,
       role: "assistant",
       content: aiReply,
+      canRaiseTicket,
     });
+  }
+
+  if (canRaiseTicket) {
+    conversation.ticketAllowed = true; // unlocks ONE ticket for this chat
+    await conversation.save();
   }
 
   return {
@@ -182,6 +202,7 @@ const getChatReply = async ({
     mode: "bot",
     sessionId: conversation.sessionId,
     reply: aiReply,
+    canRaiseTicket,
   };
 };
 

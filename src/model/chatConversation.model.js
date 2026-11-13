@@ -25,6 +25,7 @@ const chatConversationSchema = new mongoose.Schema(
     lastMessagePreview: { type: String, default: "" },
     unreadByStore: { type: Number, default: 0 },
     humanRequested: { type: Boolean, default: false },
+    ticketAllowed: { type: Boolean, default: false },
     orderId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Order",
