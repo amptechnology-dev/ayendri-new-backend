@@ -54,7 +54,9 @@ const itemGstRate = (it, gstMode) => {
 
 const paymentLabel = (order) => {
   if (order.paymentMethod === "ONLINE") {
-    const ok = (order.paymentAttempts || []).find((a) => a.status === "SUCCESS");
+    const ok = (order.paymentAttempts || []).find(
+      (a) => a.status === "SUCCESS",
+    );
     return order.paymentStatus === "PAID"
       ? `Paid online${ok?.mihpayid ? ` (Txn: ${ok.mihpayid})` : ""}`
       : "Online payment pending";
@@ -67,14 +69,44 @@ const paymentLabel = (order) => {
 
 // ---------- amount in words (Indian system) ----------
 const ONES = [
-  "", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
-  "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
-  "Seventeen", "Eighteen", "Nineteen",
+  "",
+  "One",
+  "Two",
+  "Three",
+  "Four",
+  "Five",
+  "Six",
+  "Seven",
+  "Eight",
+  "Nine",
+  "Ten",
+  "Eleven",
+  "Twelve",
+  "Thirteen",
+  "Fourteen",
+  "Fifteen",
+  "Sixteen",
+  "Seventeen",
+  "Eighteen",
+  "Nineteen",
 ];
-const TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
+const TENS = [
+  "",
+  "",
+  "Twenty",
+  "Thirty",
+  "Forty",
+  "Fifty",
+  "Sixty",
+  "Seventy",
+  "Eighty",
+  "Ninety",
+];
 
 const twoDigits = (n) =>
-  n < 20 ? ONES[n] : TENS[Math.floor(n / 10)] + (n % 10 ? ` ${ONES[n % 10]}` : "");
+  n < 20
+    ? ONES[n]
+    : TENS[Math.floor(n / 10)] + (n % 10 ? ` ${ONES[n % 10]}` : "");
 
 const threeDigits = (n) => {
   const h = Math.floor(n / 100);
@@ -197,7 +229,16 @@ const buildInvoiceHtml = ({ order, store, customer, logoSrc }) => {
       : "",
     `<tr><td>Items total</td><td class="r">${money(itemsTotal)}</td></tr>`,
     `<tr><td>Shipping</td><td class="r">${shipping > 0 ? money(shipping) : "Free"}</td></tr>`,
-    `<tr class="grand"><td>Grand Total</td><td class="r">${money(order.totalAmount)}</td></tr>`,
+    ...(Number(order.firstOrderDiscount?.amount) > 0
+      ? order.firstOrderDiscount.breakdown?.length
+        ? order.firstOrderDiscount.breakdown.map(
+            (b) =>
+              `<tr><td>First order discount - ${b.productType === "SERVICE" ? "Services" : "Products"} (${b.percent}%)</td><td class="r">- ${money(b.amount)}</td></tr>`,
+          )
+        : [
+            `<tr><td>First order discount</td><td class="r">- ${money(order.firstOrderDiscount.amount)}</td></tr>`,
+          ]
+      : []),
   ].join("");
 
   const ship = order.deliveryAddress || {};
@@ -324,7 +365,9 @@ const buildInvoiceHtml = ({ order, store, customer, logoSrc }) => {
     <div class="box">
       <h4>Billed / Shipped To</h4>
       <div class="name">${escapeHtml(ship.fullName || customer?.name || "")}</div>
-      ${addressLines(ship).map((l) => `<div>${escapeHtml(l)}</div>`).join("")}
+      ${addressLines(ship)
+        .map((l) => `<div>${escapeHtml(l)}</div>`)
+        .join("")}
       ${ship.phone ? `<div>Phone: ${escapeHtml(ship.phone)}</div>` : ""}
       ${customer?.email ? `<div>Email: ${escapeHtml(customer.email)}</div>` : ""}
     </div>
@@ -397,7 +440,11 @@ const htmlToPdfBuffer = async (html) => {
     browser = await puppeteer.launch({
       executablePath: process.env.CHROME_PATH,
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+      ],
     });
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: "load", timeout: 30000 });
@@ -445,7 +492,8 @@ const processInvoice = async (orderId) => {
   const store = await StoreModel.findById(order.storeId).lean();
 
   const invoiceNumber =
-    order.invoiceNumber || `INV${String(order.orderNumber).replace(/^ORD/, "")}`;
+    order.invoiceNumber ||
+    `INV${String(order.orderNumber).replace(/^ORD/, "")}`;
   const generatedAt = order.invoiceGeneratedAt || new Date();
 
   // store er prothom image = invoice logo

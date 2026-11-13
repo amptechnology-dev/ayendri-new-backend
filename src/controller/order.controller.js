@@ -57,6 +57,10 @@ const {
 } = require("../helper/deliveryEstimate.js");
 // [GST]
 const { getGstMode, applyGstToItem } = require("../helper/gst.js");
+const {
+  getClientPlatform,
+  resolveFirstOrderDiscount,
+} = require("../helper/firstOrderDiscount.js");
 // [নতুন] checkServiceability, checkInternationalServiceability, toCountryCode, isAvailable
 const {
   calcWeightKg,
@@ -340,7 +344,6 @@ const logSaleLines = (lines, userId) =>
     ),
   );
 
-// customer ke session er shudhu safe info dao (orderPayload / pickupAddress na)
 const publicSession = (s) => ({
   sessionId: s._id,
   storeId: s.storeId,
@@ -349,6 +352,7 @@ const publicSession = (s) => ({
   amount: s.amount,
   itemsTotal: s.itemsTotal,
   shippingCharge: s.shippingCharge,
+  firstOrderDiscount: s.orderPayload?.firstOrderDiscount || null,
   expiresAt: s.expiresAt,
   orderId: s.orderId || null,
 });
@@ -654,6 +658,7 @@ const attemptStoreCheckout = async ({
   bookingDate, // [BOOKING] "YYYY-MM-DD" (dryRun e lagbe na)
   paymentMethod,
   fastestDelivery = false, // [FASTEST] customer's choice at order time
+  platform = "WEB",
   cart = null, // { cartId, itemIds } -> ONLINE payment success hole cart theke remove
   dryRun = false,
 }) => {
@@ -948,9 +953,17 @@ const attemptStoreCheckout = async ({
     fastest: wantsFastest,
   });
   const shippingCharge = round2(shippingInfo?.shippingCharge || 0);
-  const grandTotal = round2(itemsTotal + shippingCharge);
 
-  // ---------- preview: order create / stock minus na kore hishab ferot ----------
+  const firstOrderDiscount = await resolveFirstOrderDiscount({
+    userId,
+    storeId,
+    platform,
+    totalsByType,
+    priceStatus,
+  });
+  const discountAmount = firstOrderDiscount?.amount || 0;
+  const grandTotal = round2(itemsTotal + shippingCharge - discountAmount);
+
   if (dryRun) {
     let fastestOption = { available: false };
     if (shippingInfo && delivery.info?.mode !== "LOCAL") {
@@ -1000,6 +1013,7 @@ const attemptStoreCheckout = async ({
         itemsTotal,
         shippingCharge,
         grandTotal,
+        firstOrderDiscount,
         delivery: shippingInfo,
         deliveryEnabled: policy.hasDelivery,
         paymentMode: policy.paymentMode,
@@ -1033,6 +1047,7 @@ const attemptStoreCheckout = async ({
     totalGst,
     itemsTotal,
     shippingCharge,
+    firstOrderDiscount,
     deliveryEnabled: policy.hasDelivery,
     totalAmount: grandTotal,
     priceStatus,
@@ -1174,6 +1189,7 @@ const restoreOrderStock = async (order, userId) => {
 const checkout = async (req, res) => {
   try {
     const userId = getUserId(req);
+    const platform = getClientPlatform(req);
     const {
       cartId,
       storeIds,
@@ -1235,6 +1251,7 @@ const checkout = async (req, res) => {
           bookingDate: group.bookingDate,
           paymentMethod,
           fastestDelivery,
+          platform,
           cart: { cartId, itemIds: group.itemIds },
         });
 
@@ -1312,6 +1329,7 @@ const checkout = async (req, res) => {
 const buyNow = async (req, res) => {
   try {
     const userId = getUserId(req);
+    const platform = getClientPlatform(req);
     const {
       productId,
       variantId,
@@ -1343,6 +1361,7 @@ const buyNow = async (req, res) => {
       bookingDate,
       paymentMethod,
       fastestDelivery,
+      platform,
     });
 
     if (!result.success) {
@@ -1601,7 +1620,7 @@ const cancelMyOrder = async (req, res) => {
       extra: { cancelReason: reason, cancelledBy: "USER", autoShip: false },
     });
 
-        if (!order) {
+    if (!order) {
       return res.status(409).json({
         success: false,
         message: "Order status has just changed, please refresh",
@@ -2301,6 +2320,7 @@ const previewStore = async ({
   deliveryAddress,
   paymentMethod,
   fastestDelivery = false,
+  platform = "WEB",
 }) => {
   const [store, policy] = await Promise.all([
     StoreModel.findById(storeId).select("storeName storeUniqueId").lean(),
@@ -2325,6 +2345,7 @@ const previewStore = async ({
     note: null,
     paymentMethod,
     fastestDelivery,
+    platform,
     dryRun: true,
   });
 
@@ -2338,6 +2359,7 @@ const previewStore = async ({
       itemsTotal: 0,
       shippingCharge: 0,
       grandTotal: 0,
+      firstOrderDiscount: null,
       delivery: null,
       fastestOption: { available: false },
     };
@@ -2353,6 +2375,7 @@ const previewStore = async ({
     totalItems: p.totalItems,
     itemsTotal: p.itemsTotal,
     shippingCharge: p.shippingCharge,
+    firstOrderDiscount: p.firstOrderDiscount || null,
     grandTotal: p.grandTotal,
     delivery: p.delivery,
     fastestDelivery: p.fastestDelivery,
@@ -2367,7 +2390,7 @@ const checkoutPreview = async (req, res) => {
     const paymentMethod = req.body?.paymentMethod === "COD" ? "COD" : "ONLINE";
     // [FASTEST] customer's toggle
     const fastestDelivery = toBool(req.body?.fastestDelivery);
-
+    const platform = getClientPlatform(req);
     const addr = req.body?.deliveryAddress || {};
     const deliveryAddress = {
       pincode: String(addr.pincode ?? req.body?.pincode ?? "").trim(),
@@ -2468,6 +2491,12 @@ const checkoutPreview = async (req, res) => {
     const okStores = stores.filter((s) => s.ok);
     const sum = (key) =>
       round2(okStores.reduce((total, s) => total + Number(s[key] || 0), 0));
+    const firstOrderDiscountTotal = round2(
+      okStores.reduce(
+        (t, s) => t + Number(s.firstOrderDiscount?.amount || 0),
+        0,
+      ),
+    );
 
     return res.status(200).json({
       success: true,
@@ -2477,6 +2506,7 @@ const checkoutPreview = async (req, res) => {
       fastestAvailable: okStores.some((s) => s.fastestOption?.available),
       itemsTotal: sum("itemsTotal"),
       totalShipping: sum("shippingCharge"),
+      firstOrderDiscount: firstOrderDiscountTotal,
       grandTotal: sum("grandTotal"),
       codAvailable: stores.every((s) => s.codAvailable),
       paymentRequired: stores.some((s) => s.onlineAvailable),

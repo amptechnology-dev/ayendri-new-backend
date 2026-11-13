@@ -12,7 +12,11 @@ const resolveStore = async (userId, storeId) => {
   return StoreModel.findOne({ userId });
 };
 
-// setting doc na thakle ba purono doc e notun field na thakle default
+const toDiscountCfg = (c) => ({
+  enabled: c?.enabled === true,
+  percent: Number(c?.percent) || 0,
+});
+
 const toPayload = (settings) => {
   const paymentMode = resolvePaymentMode(settings);
   return {
@@ -23,6 +27,10 @@ const toPayload = (settings) => {
     hasDelivery: settings ? settings.hasDelivery !== false : true,
     paymentMode,
     paymentFirst: paymentMode === "ONLINE_ONLY",
+    mobileFirstOrderDiscount: {
+      product: toDiscountCfg(settings?.mobileFirstOrderDiscount?.product),
+      service: toDiscountCfg(settings?.mobileFirstOrderDiscount?.service),
+    },
   };
 };
 

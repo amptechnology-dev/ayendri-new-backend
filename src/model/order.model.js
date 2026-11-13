@@ -144,6 +144,28 @@ const priceHistorySchema = new mongoose.Schema(
   { _id: false },
 );
 
+const firstOrderDiscountSchema = new mongoose.Schema(
+  {
+    percent: { type: Number, default: null, min: 0, max: 100 },
+    amount: { type: Number, min: 0 },
+    platform: { type: String, default: "MOBILE" },
+    breakdown: {
+      type: [
+        new mongoose.Schema(
+          {
+            productType: { type: String, enum: ["PRODUCT", "SERVICE"] },
+            percent: { type: Number, min: 0, max: 100 },
+            amount: { type: Number, min: 0 },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
+  },
+  { _id: false },
+);
+
 // order place er somoy store er delivery setting onujayi estimate + shipping charge
 const deliveryInfoSchema = new mongoose.Schema(
   {
@@ -180,6 +202,8 @@ const deliveryInfoSchema = new mongoose.Schema(
     fastestFeeApplied: { type: Boolean, default: false }, // fixed fastest fee charged instead of courier rate
     chargeableWeightKg: { type: Number, default: null },
     shippingCharge: { type: Number, default: 0 }, // customer ke je charge
+    itemsTotal: { type: Number, default: null, min: 0 },
+    firstOrderDiscount: { type: firstOrderDiscountSchema, default: null },
     baseShippingCharge: { type: Number, default: null }, // order value rule er age
     shippingNote: { type: String, default: null }, // "Within 5 km" / "Free delivery on orders of ₹500 or more"
     country: { type: String, default: null },

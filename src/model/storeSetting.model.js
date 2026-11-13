@@ -21,6 +21,16 @@ const storeSettingSchema = new mongoose.Schema(
     paymentMode: { type: String, enum: ["BOTH", "ONLINE_ONLY", "OFF"] },
     // purono field (paymentMode er age eta chilo). Notun code paymentMode er upor nirbhor kore
     paymentFirst: { type: Boolean, default: false },
+    mobileFirstOrderDiscount: {
+      product: {
+        enabled: { type: Boolean, default: false },
+        percent: { type: Number, default: 0, min: 0, max: 90 },
+      },
+      service: {
+        enabled: { type: Boolean, default: false },
+        percent: { type: Number, default: 0, min: 0, max: 90 },
+      },
+    },
   },
   { timestamps: true },
 );
