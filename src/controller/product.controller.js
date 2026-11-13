@@ -65,6 +65,13 @@ const {
   isPastCutoff,
   cutoffLabel,
 } = require("../helper/bookingConfig.js");
+const {
+  issuePhoneOtp,
+  verifyPhoneOtpCode,
+  clearPhoneOtp,
+} = require("../helper/phoneOtp.js");
+
+const PRODUCT_OTP_PURPOSE = "PRODUCT_VERIFY";
 
 const policyErrorResponse = (res, error) =>
   res.status(400).json({
@@ -538,7 +545,7 @@ const createProduct = async (req, res) => {
       storeId: parsedData.storeId,
       categoryId: parsedData.categoryId,
       userId,
-      isVerified: true,
+      isVerified: false, // [CHANGED] OTP diye verify na kora porjonto public e dekhabe na
       hasVariants,
       hasColor,
       ...data,
@@ -588,7 +595,8 @@ const createProduct = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: "Product created successfully",
+      message:
+        "Product created. Verify it with OTP from Unverified Products to publish it.",
       data: product,
     });
   } catch (error) {
@@ -641,6 +649,9 @@ const getAllProducts = async (req, res) => {
     const matchStage = {
       userId: new mongoose.Types.ObjectId(userId),
     };
+
+    if (req.query.verified === "true") matchStage.isVerified = true;
+    if (req.query.verified === "false") matchStage.isVerified = false;
 
     if (search) {
       matchStage.$or = [
@@ -802,6 +813,20 @@ const updateProduct = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Product not found" });
+    }
+
+    // [OTP] update korte hole OTP lagbe
+    const updateOtp = await verifyPhoneOtpCode(
+      user.phone,
+      PRODUCT_OTP_PURPOSE,
+      String(req.body.otp || "").trim(),
+    );
+    if (!updateOtp.ok) {
+      return res.status(updateOtp.status || 400).json({
+        success: false,
+        message: updateOtp.message || "Invalid OTP",
+        errors: [{ field: "otp", message: updateOtp.message || "Invalid OTP" }],
+      });
     }
 
     // [STOCK] ei product e stock management on kina (product er nijer snapshot flag)
@@ -1119,6 +1144,8 @@ const updateProduct = async (req, res) => {
       },
       { new: true, runValidators: true },
     );
+
+    await clearPhoneOtp(user.phone, PRODUCT_OTP_PURPOSE);
 
     if (pickupMailAddress?.email) {
       mailPickupContact({
@@ -1765,7 +1792,9 @@ const getStoreCategories = async (req, res) => {
     const match = { storeId: store._id, isActive: true };
 
     // [CAT TYPE] optional ?type=PRODUCT|SERVICE
-    const type = String(req.query.type || "").trim().toUpperCase();
+    const type = String(req.query.type || "")
+      .trim()
+      .toUpperCase();
     if (type) {
       if (!["PRODUCT", "SERVICE"].includes(type)) {
         return res
@@ -2218,6 +2247,149 @@ const getBookingAvailability = async (req, res) => {
   }
 };
 
+// POST /api/product/send-otp
+const sendProductOtp = async (req, res) => {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    const user = await UserModel.findById(userId);
+    if (!user || user.role !== "STORE") {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+    if (!user.phone) {
+      return res.status(400).json({
+        success: false,
+        message: "No mobile number found for this account",
+      });
+    }
+
+    const result = await issuePhoneOtp(user.phone, PRODUCT_OTP_PURPOSE);
+    if (!result.ok) {
+      return res.status(result.status || 400).json({
+        success: false,
+        message: result.message,
+        retryAfter: result.retryAfter,
+      });
+    }
+
+    return res
+      .status(200)
+      .json({ success: true, message: "OTP sent to your mobile number" });
+  } catch (error) {
+    console.error("Send product OTP error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to send OTP. Please try again later.",
+    });
+  }
+};
+
+// POST /api/product/verify-products   body: { productIds: string[], otp }
+const verifyProducts = async (req, res) => {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    const user = await UserModel.findById(userId);
+    if (!user || user.role !== "STORE") {
+      return res.status(403).json({ success: false, message: "Forbidden" });
+    }
+
+    const { productIds, otp } = req.body;
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Select at least one product" });
+    }
+    if (productIds.length > 200) {
+      return res.status(400).json({
+        success: false,
+        message: "You can verify at most 200 products at once",
+      });
+    }
+    if (!productIds.every((id) => mongoose.isValidObjectId(id))) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+    if (!String(otp || "").trim()) {
+      return res
+        .status(400)
+        .json({ success: false, message: "OTP is required" });
+    }
+
+    // [OTP] shobar age OTP check
+    const check = await verifyPhoneOtpCode(
+      user.phone,
+      PRODUCT_OTP_PURPOSE,
+      String(otp).trim(),
+    );
+    if (!check.ok) {
+      return res
+        .status(check.status || 400)
+        .json({ success: false, message: check.message || "Invalid OTP" });
+    }
+
+    // [SECURITY] shudhu nijer + ekhono unverified product
+    const filter = {
+      _id: { $in: productIds },
+      userId,
+      isVerified: false,
+    };
+    const products = await ProductModel.find(filter)
+      .select("name storeId")
+      .lean();
+
+    if (!products.length) {
+      return res.status(404).json({
+        success: false,
+        message: "No unverified products found to verify",
+      });
+    }
+
+    await ProductModel.updateMany(
+      { _id: { $in: products.map((p) => p._id) }, userId },
+      { $set: { isVerified: true } },
+    );
+    await clearPhoneOtp(user.phone, PRODUCT_OTP_PURPOSE);
+
+    // verify email (fire-and-forget, fail korle verify block hobe na)
+    (async () => {
+      try {
+        if (!user.email) return;
+        const stores = await StoreModel.find({
+          _id: { $in: [...new Set(products.map((p) => String(p.storeId)))] },
+        })
+          .select("storeName storeUniqueId")
+          .lean();
+        const storeMap = new Map(stores.map((s) => [String(s._id), s]));
+        for (const p of products) {
+          const s = storeMap.get(String(p.storeId));
+          if (!s) continue;
+          await sendProductVerifyEmail(
+            user.email,
+            p.name,
+            s.storeName,
+            s.storeUniqueId,
+          ).catch((e) =>
+            console.error("Product verify mail error:", e.message),
+          );
+        }
+      } catch (e) {
+        console.error("Product verify mail error:", e.message);
+      }
+    })();
+
+    return res.status(200).json({
+      success: true,
+      message: `${products.length} product${products.length > 1 ? "s" : ""} verified successfully`,
+      verifiedCount: products.length,
+    });
+  } catch (error) {
+    console.error("Verify products error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
 module.exports = {
   createProduct,
   getAllProducts,
@@ -2232,4 +2404,6 @@ module.exports = {
   getStoreSingleProduct,
   getProductPickupAddress,
   getBookingAvailability,
+  sendProductOtp,
+  verifyProducts,
 };

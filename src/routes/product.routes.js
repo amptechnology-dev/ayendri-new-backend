@@ -17,7 +17,9 @@ const {
   getStoreProductsByCategory,
   getStoreSingleProduct,
   getProductPickupAddress,
-  getBookingAvailability
+  getBookingAvailability,
+  sendProductOtp,
+  verifyProducts
 } = require("../controller/product.controller.js");
 
 // ---------- STORE (authenticated) ----------
@@ -65,5 +67,7 @@ router.get(
   "/store/:storeUniqueId/products/:productId/availability",
   getBookingAvailability,
 );
+router.post("/send-otp", verifyJwt, authorize("STORE"), sendProductOtp);
+router.post("/verify-products", verifyJwt, authorize("STORE"), verifyProducts);
 
 module.exports = router;
