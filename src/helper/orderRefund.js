@@ -1,3 +1,11 @@
+const {
+  DEFAULT_CUTOFF,
+  normCutoff,
+  cutoffLabel,
+  isPastCutoff,
+  earliestBookingYmdFor,
+} = require("./bookingConfig.js");
+
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -6,10 +14,7 @@ const todayIST = () =>
 const round2 = (n) => Math.round((Number(n || 0) + Number.EPSILON) * 100) / 100;
 
 // ===================== [BOOKING / CANCEL RULES] =====================
-const BOOKING_CUTOFF_HOUR_IST = 16; // bikel 4 ta (IST)
-const BOOKING_CUTOFF_LABEL = "4:00 PM";
-
-const istNow = () => new Date(Date.now() + IST_OFFSET_MS);
+const BOOKING_CUTOFF_LABEL = cutoffLabel(DEFAULT_CUTOFF); // default label, compat
 
 const ymdAddDays = (ymd, n) => {
   const d = new Date(`${ymd}T00:00:00.000Z`);
@@ -17,20 +22,16 @@ const ymdAddDays = (ymd, n) => {
   return d.toISOString().slice(0, 10);
 };
 
-// ajker 4 ta (IST) pera gele true
-const isPastBookingCutoff = () =>
-  istNow().getUTCHours() >= BOOKING_CUTOFF_HOUR_IST;
+// ajker cutoff (IST) pera gele true
+const isPastBookingCutoff = (cfg) => isPastCutoff(cfg);
 
-// 4 tar age: aj theke booking hobe. 4 tar por: aj ar booking hobe na, kal theke
-const earliestBookingYmd = () => {
-  const today = todayIST();
-  return isPastBookingCutoff() ? ymdAddDays(today, 1) : today;
-};
+// cutoff er age: aj theke. Cutoff er por: kal theke
+const earliestBookingYmd = (cfg) => earliestBookingYmdFor(cfg);
 
-// SERVICE cancel deadline = booking date er ager din bikel 4 ta (IST)
-const serviceCancelDeadline = (bookingYmd) =>
+// SERVICE cancel deadline = booking date er ager din, store er cutoff somoy (IST)
+const serviceCancelDeadline = (bookingYmd, cfg) =>
   new Date(
-    `${ymdAddDays(bookingYmd, -1)}T${String(BOOKING_CUTOFF_HOUR_IST).padStart(2, "0")}:00:00.000+05:30`,
+    `${ymdAddDays(bookingYmd, -1)}T${normCutoff(cfg?.cutoffTime)}:00.000+05:30`,
   );
 
 // courier product receive / pickup kore nile (Shiprocket webhook status)
@@ -81,7 +82,7 @@ const requestRefundAmount = (order, item, type) => {
   return itemRefundAmount(item);
 };
 
-const getCancelEligibility = (order) => {
+const getCancelEligibility = (order, cfg) => {
   const no = (message) => ({ ok: false, message, deadline: null });
 
   if (order.orderType === "REPLACEMENT") {
@@ -116,17 +117,17 @@ const getCancelEligibility = (order) => {
     }
     const booking = new Date(order.bookingDate).toISOString().slice(0, 10);
 
-    // [SAME DAY] aj-er-booking aj-i korle (ba booking date aj / aager) cancel kora jabe na
+    // [SAME DAY] booking date aj / aager hole cancel kora jabe na
     if (booking <= todayIST()) {
       return no(
         "A same-day service booking cannot be cancelled once it is placed",
       );
     }
 
-    const deadline = serviceCancelDeadline(booking);
+    const deadline = serviceCancelDeadline(booking, cfg);
     if (Date.now() >= deadline.getTime()) {
       return no(
-        `A service booking can be cancelled only until ${BOOKING_CUTOFF_LABEL} on the day before the booking date (${booking})`,
+        `A service booking can be cancelled only until ${cutoffLabel(cfg?.cutoffTime)} on the day before the booking date (${booking})`,
       );
     }
     return { ok: true, message: null, deadline };
@@ -153,7 +154,7 @@ const getCancelEligibility = (order) => {
 };
 
 // purono naam e onno jaygay use hole jeno na bhange
-const checkCancelRefund = (order) => getCancelEligibility(order);
+const checkCancelRefund = (order, cfg) => getCancelEligibility(order, cfg);
 
 // delivered order er item e return / replace / refund request
 const checkRequestEligibility = (order, item, type) => {

@@ -77,6 +77,10 @@ const storeDeliverySchema = new mongoose.Schema(
     handlingMinutes: { type: Number, default: null, min: 0 },
     handlingDays: { type: Number, default: 1, min: 0 }, // purono field, compat
 
+    bookingCutoffTime: { type: String, default: "16:00" },
+    // ei date gulote kono SERVICE booking hobe na ("YYYY-MM-DD")
+    blockedBookingDates: { type: [String], default: [] },
+
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true },

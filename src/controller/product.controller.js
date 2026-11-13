@@ -58,10 +58,13 @@ const {
 const { sendPickupContactProductMail } = require("../helper/pickupMail.js");
 const BookingSlotModel = require("../model/bookingSlot.model.js");
 const {
-  earliestBookingYmd,
-  isPastBookingCutoff,
-  BOOKING_CUTOFF_LABEL,
-} = require("../helper/orderRefund.js");
+  getBookingConfig,
+  earliestBookingYmdFor,
+  nextAvailableBookingYmd,
+  upcomingBlockedDates,
+  isPastCutoff,
+  cutoffLabel,
+} = require("../helper/bookingConfig.js");
 
 const policyErrorResponse = (res, error) =>
   res.status(400).json({
@@ -2148,12 +2151,33 @@ const getBookingAvailability = async (req, res) => {
         .json({ success: false, message: "Service not found" });
     }
 
-    // [BOOKING] 4 PM er por aj er booking bondho, kal theke
-    const earliest = earliestBookingYmd();
-    const cutoff = {
-      earliestBookingDate: earliest,
-      todayClosed: isPastBookingCutoff(),
-      cutoffLabel: BOOKING_CUTOFF_LABEL,
+    // [BOOKING] store er cutoff + blocked date
+    const cfg = await getBookingConfig(store._id);
+    const blocked = new Set(cfg.blockedDates);
+    const rawEarliest = earliestBookingYmdFor(cfg);
+
+    const fromQ = String(req.query.from || "");
+    const from =
+      /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && fromQ >= rawEarliest
+        ? fromQ
+        : rawEarliest;
+    const count = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 60);
+
+    // blocked date skip kore bookable date list (blocked date response e ashbe na)
+    const dates = [];
+    let cursor = from;
+    for (let i = 0; i < 400 && dates.length < count; i++) {
+      if (!blocked.has(cursor)) dates.push(cursor);
+      cursor = ymdAddDays(cursor, 1);
+    }
+
+    const meta = {
+      earliestBookingDate: nextAvailableBookingYmd(cfg),
+      todayClosed: isPastCutoff(cfg),
+      cutoffTime: cfg.cutoffTime,
+      cutoffLabel: cutoffLabel(cfg.cutoffTime),
+      blockedDates: upcomingBlockedDates(cfg), // calendar e disable korar jonno (chaile mobile ignore korte pare)
+      availableDates: dates,
     };
 
     const limit = product.dailyBookingLimit;
@@ -2163,16 +2187,9 @@ const getBookingAvailability = async (req, res) => {
         limited: false,
         dailyBookingLimit: null,
         days: [],
-        ...cutoff,
+        ...meta,
       });
     }
-
-    const fromQ = String(req.query.from || "");
-    const from =
-      /^\d{4}-\d{2}-\d{2}$/.test(fromQ) && fromQ >= earliest ? fromQ : earliest;
-    const days = Math.min(Math.max(parseInt(req.query.days, 10) || 14, 1), 60);
-
-    const dates = Array.from({ length: days }, (_, i) => ymdAddDays(from, i));
 
     const slots = await BookingSlotModel.find({
       productId: product._id,
@@ -2186,7 +2203,7 @@ const getBookingAvailability = async (req, res) => {
       success: true,
       limited: true,
       dailyBookingLimit: limit,
-      ...cutoff,
+      ...meta,
       days: dates.map((date) => {
         const booked = countMap.get(date) || 0;
         const remaining = Math.max(0, limit - booked);

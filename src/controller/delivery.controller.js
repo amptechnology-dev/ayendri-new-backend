@@ -30,6 +30,7 @@ const { notifyUserOrderStatus } = require("../helper/notification.helper.js");
 const { getStorePolicy } = require("../helper/storePolicy.js");
 const { sendPickupContactShipmentMail } = require("../helper/pickupMail.js");
 const { markReplacementDelivered } = require("./orderRequest.controller.js");
+const { todayYmdIST } = require("../helper/bookingConfig.js");
 
 const parseDate = (v) => {
   if (!v) return null;
@@ -190,6 +191,17 @@ const saveDeliverySettings = async (req, res) => {
     if (!needsNational) {
       update.fastestChargeProduct = null;
       update.fastestChargeService = null;
+    }
+
+     if (data.bookingCutoffTime !== undefined) {
+      update.bookingCutoffTime = data.bookingCutoffTime;
+    }
+    if (data.blockedBookingDates !== undefined) {
+      const today = todayYmdIST();
+      // shudhu aj / future date, duplicate bad
+      update.blockedBookingDates = [...new Set(data.blockedBookingDates)]
+        .filter((d) => d >= today)
+        .sort();
     }
 
     if (needsNational) {

@@ -87,6 +87,11 @@ const { cancelShipment } = require("../helper/shiprocket.js");
 const { startFulfilment } = require("../helper/fulfilment.js");
 const { markReplacementDelivered } = require("./orderRequest.controller.js");
 const CheckoutSessionModel = require("../model/checkoutSession.model.js");
+const {
+  getBookingConfig,
+  getBookingConfigMap,
+  validateBookingDate,
+} = require("../helper/bookingConfig.js");
 
 // ===================== CONSTANTS / HELPERS =====================
 const ORDER_STATUSES = [
@@ -286,11 +291,11 @@ const getProductCancelEligibility = (o) => {
   return { ok: true };
 };
 
-const resolveCancelEligibility = (o) =>
-  o?.hasService ? getCancelEligibility(o) : getProductCancelEligibility(o);
+const resolveCancelEligibility = (o, cfg) =>
+  o?.hasService ? getCancelEligibility(o, cfg) : getProductCancelEligibility(o);
 
-const withCancelInfo = (o) => {
-  const e = resolveCancelEligibility(o); // <-- আগে getCancelEligibility(o) ছিল
+const withCancelInfo = (o, cfg) => {
+  const e = resolveCancelEligibility(o, cfg);
   return {
     ...o,
     items: (o.items || []).map((i) => ({
@@ -305,6 +310,10 @@ const withCancelInfo = (o) => {
     },
   };
 };
+
+// order list er jonno store wise config ekbar-e load
+const bookingCfgMapFor = (orders) =>
+  getBookingConfigMap(orders.filter((o) => o.hasService).map((o) => o.storeId));
 
 // ===================== [BOOKING LIMIT] =====================
 const dateKey = (d) => new Date(d).toISOString().slice(0, 10);
@@ -556,24 +565,34 @@ const splitLiveItems = async (items) => {
     .select("_id productType")
     .lean();
   const typeMap = new Map(docs.map((d) => [String(d._id), d.productType]));
-  // [BOOKING] 4 tar age aj, 4 tar por kal theke
-  const earliest = earliestBookingYmd();
+
+  // [BOOKING] store wise cutoff + blocked date
+  const cfgMap = await getBookingConfigMap(
+    items
+      .filter((i) => typeMap.get(String(i.productId)) === "SERVICE")
+      .map((i) => i.storeId),
+  );
 
   const live = [];
   const dead = [];
-  const badBooking = [];
+  const badBooking = []; // { item, code, message, earliest, blockedDates }
   for (const i of items) {
-    const type = typeMap.get(String(i.productId));
-    if (!typeMap.has(String(i.productId))) {
+    const key = String(i.productId);
+    if (!typeMap.has(key)) {
       dead.push(i);
-    } else if (
-      type === "SERVICE" &&
-      (!i.bookingDate || i.bookingDate < earliest)
-    ) {
-      badBooking.push(i);
-    } else {
-      live.push(i);
+      continue;
     }
+    if (typeMap.get(key) === "SERVICE") {
+      const v = validateBookingDate(
+        i.bookingDate,
+        cfgMap.get(String(i.storeId)),
+      );
+      if (!v.ok) {
+        badBooking.push({ item: i, ...v });
+        continue;
+      }
+    }
+    live.push(i);
   }
   return { live, dead, badBooking };
 };
@@ -581,16 +600,20 @@ const splitLiveItems = async (items) => {
 const bookingIssuesResponse = (res, badBooking) =>
   res.status(400).json({
     success: false,
-    code: "BOOKING_DATE_INVALID",
+    code: badBooking[0].code || "BOOKING_DATE_INVALID",
     message: `Please choose a valid booking date for: ${badBooking
-      .map((i) => i.name)
-      .join(", ")}. Booking for today closes at ${BOOKING_CUTOFF_LABEL}`,
-    earliestBookingDate: earliestBookingYmd(),
-    bookingIssues: badBooking.map((i) => ({
-      itemId: i._id,
-      productId: i.productId,
-      name: i.name,
-      bookingDate: i.bookingDate ?? null,
+      .map((b) => b.item.name)
+      .join(", ")}. ${badBooking[0].message}`,
+    earliestBookingDate: badBooking[0].earliest,
+    bookingIssues: badBooking.map((b) => ({
+      itemId: b.item._id,
+      productId: b.item.productId,
+      name: b.item.name,
+      bookingDate: b.item.bookingDate ?? null,
+      code: b.code,
+      message: b.message,
+      earliestBookingDate: b.earliest,
+      blockedDates: b.blockedDates,
     })),
   });
 
@@ -690,13 +713,14 @@ const attemptStoreCheckout = async ({
   );
 
   if (hasService && !dryRun) {
-    const earliest = earliestBookingYmd();
-    if (!bookingDate || bookingDate < earliest) {
+    const bookingCfg = await getBookingConfig(storeId);
+    const v = validateBookingDate(bookingDate, bookingCfg);
+    if (!v.ok) {
       return {
         success: false,
         storeId,
-        code: "BOOKING_DATE_INVALID",
-        message: `Booking for today closes at ${BOOKING_CUTOFF_LABEL}. Please choose ${earliest} or a later date`,
+        code: v.code,
+        message: v.message,
       };
     }
   }
@@ -1440,13 +1464,15 @@ const getOrdersGroupedByStore = async (
   pipeline.push({ $sort: { latestOrderAt: -1 } });
 
   const grouped = await OrderModel.aggregate(pipeline);
-
+  const cfgMap = await bookingCfgMapFor(grouped.flatMap((g) => g.orders));
   return grouped.map((g) => ({
     storeId: g._id,
     storeName: g.storeName,
     storeUniqueId: g.storeUniqueId,
     totalOrders: g.totalOrders,
-    orders: g.orders.map(withCancelInfo),
+    orders: g.orders.map((o) =>
+      withCancelInfo(o, cfgMap.get(String(o.storeId))),
+    ),
   }));
 };
 
@@ -1486,7 +1512,9 @@ const getMyOrders = async (req, res) => {
       limit: limitNum,
       totalOrders,
       totalPages: Math.ceil(totalOrders / limitNum),
-      orders: orders.map(withCancelInfo),
+      orders: orders.map((o) =>
+        withCancelInfo(o, cfgMap.get(String(o.storeId))),
+      ),
     });
   } catch (error) {
     return handleError(res, error, "Get My Orders Error");
@@ -1539,9 +1567,10 @@ const getMyOrderById = async (req, res) => {
         .json({ success: false, message: "Order not found" });
     }
 
+    const cfg = order.hasService ? await getBookingConfig(order.storeId) : null;
     return res
       .status(200)
-      .json({ success: true, order: withCancelInfo(order) });
+      .json({ success: true, order: withCancelInfo(order, cfg) });
   } catch (error) {
     return handleError(res, error, "Get My Order By Id Error");
   }
@@ -1575,7 +1604,10 @@ const cancelMyOrder = async (req, res) => {
       });
     }
 
-    const eligibility = resolveCancelEligibility(existing);
+    const cancelCfg = existing.hasService
+      ? await getBookingConfig(existing.storeId)
+      : null;
+    const eligibility = resolveCancelEligibility(existing, cancelCfg);
     if (!eligibility.ok) {
       return res.status(400).json({
         success: false,

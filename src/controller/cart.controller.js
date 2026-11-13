@@ -26,9 +26,11 @@ const { hasPrice } = require("../helper/priceQuote.js");
 const { getGstMode, calcLineGst } = require("../helper/gst.js");
 const BookingSlotModel = require("../model/bookingSlot.model.js");
 const {
-  earliestBookingYmd,
-  BOOKING_CUTOFF_LABEL,
-} = require("../helper/orderRefund.js");
+  getBookingConfig,
+  getBookingConfigMap,
+  validateBookingDate,
+  upcomingBlockedDates,
+} = require("../helper/bookingConfig.js");
 
 // ===================== HELPERS =====================
 
@@ -43,11 +45,8 @@ const getDeliveryState = (req) =>
     : null;
 
 // ===================== [BOOKING] =====================
-const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-const todayIST = () =>
-  new Date(Date.now() + IST_OFFSET_MS).toISOString().slice(0, 10);
 
-const parseBookingDate = (raw) => {
+const parseBookingDate = (raw, cfg) => {
   if (raw === undefined || raw === null || String(raw).trim() === "") {
     return { value: null };
   }
@@ -58,15 +57,9 @@ const parseBookingDate = (raw) => {
     new Date(`${s}T00:00:00.000Z`).toISOString().slice(0, 10) === s;
   if (!valid) return { error: "Invalid booking date" };
 
-  const earliest = earliestBookingYmd();
-  if (s < earliest) {
-    return {
-      error:
-        s < todayIST()
-          ? "Booking date cannot be in the past"
-          : `Booking for today closes at ${BOOKING_CUTOFF_LABEL}. Please choose ${earliest} or a later date`,
-    };
-  }
+  // [BOOKING] store er cutoff + blocked date
+  const v = validateBookingDate(s, cfg);
+  if (!v.ok) return { error: v.message, code: v.code };
   return { value: s };
 };
 
@@ -191,6 +184,11 @@ const serializeCart = async (
 
   const productMap = new Map(products.map((p) => [String(p._id), p]));
   const storeMap = new Map(stores.map((s) => [String(s._id), s]));
+  const bookingCfgMap = await getBookingConfigMap(
+    cart.items
+      .filter((i) => isServiceProduct(productMap.get(String(i.productId))))
+      .map((i) => i.storeId),
+  );
 
   const overall = newSummary();
   const groups = new Map();
@@ -289,6 +287,12 @@ const serializeCart = async (
       }
     }
 
+    const isService = isServiceProduct(liveProduct);
+    const bookingCfg = bookingCfgMap.get(storeKey);
+    const bookingCheck = isService
+      ? validateBookingDate(item.bookingDate, bookingCfg)
+      : null;
+
     group.items.push({
       _id: item._id,
       productId: item.productId,
@@ -326,12 +330,13 @@ const serializeCart = async (
       quantityExceedsStock: exceedsStock,
       productType: liveProduct?.productType ?? "PRODUCT",
       bookingDate: item.bookingDate ?? null,
-      bookingDateExpired:
-        isServiceProduct(liveProduct) &&
-        (!item.bookingDate || item.bookingDate < earliestBookingYmd()),
-      earliestBookingDate: isServiceProduct(liveProduct)
-        ? earliestBookingYmd()
-        : null,
+      bookingDateExpired: isService && !bookingCheck.ok, // compat: invalid / expired / blocked shob
+      bookingDateBlocked:
+        isService && bookingCheck.code === "BOOKING_DATE_BLOCKED",
+      bookingDateIssue:
+        isService && !bookingCheck.ok ? bookingCheck.message : null,
+      earliestBookingDate: isService ? bookingCheck.earliest : null,
+      blockedBookingDates: isService ? upcomingBlockedDates(bookingCfg) : [],
     });
   }
 
@@ -379,7 +384,10 @@ const addToCart = async (req, res) => {
     // [BOOKING] SERVICE hole date must, PRODUCT hole date ignore
     let bookingDate = null;
     if (isServiceProduct(product)) {
-      const bd = parseBookingDate(req.body?.bookingDate);
+      const bd = parseBookingDate(
+        req.body?.bookingDate,
+        await getBookingConfig(product.storeId),
+      );
       if (bd.error) {
         return res.status(400).json({
           success: false,
@@ -559,7 +567,10 @@ const updateCartItem = async (req, res) => {
     let nextBookingDate = item.bookingDate ?? null;
     if (isServiceProduct(product)) {
       if (req.body?.bookingDate !== undefined) {
-        const bd = parseBookingDate(req.body.bookingDate);
+        const bd = parseBookingDate(
+          req.body.bookingDate,
+          await getBookingConfig(product.storeId),
+        );
         if (bd.error || !bd.value) {
           return res.status(400).json({
             success: false,

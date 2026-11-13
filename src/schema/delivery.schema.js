@@ -24,6 +24,20 @@ const optionalFee = z.preprocess(
   z.coerce.number().min(0).max(100000).nullable().optional(),
 );
 
+const bookingCutoffField = z
+  .string()
+  .trim()
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Enter time as HH:mm (24 hour)");
+
+const blockedDateField = z
+  .string()
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD")
+  .refine(
+    (s) => new Date(`${s}T00:00:00.000Z`).toISOString().slice(0, 10) === s,
+    "Invalid date",
+  );
+
 const saveDeliverySettingsSchema = z
   .object({
     storeId: z.string().min(1, "Store is required"),
@@ -54,12 +68,18 @@ const saveDeliverySettingsSchema = z
     allowInternational: z.boolean().optional(),
     internationalMinDays: z.coerce.number().int().min(0).max(90).optional(),
     internationalMaxDays: z.coerce.number().int().min(0).max(90).optional(),
-    internationalFallbackCharge: z.coerce.number().min(0).max(100000).optional(),
+    internationalFallbackCharge: z.coerce
+      .number()
+      .min(0)
+      .max(100000)
+      .optional(),
 
     // dispatch time
     handlingValue: z.coerce.number().min(0).max(100000).optional(),
     handlingUnit: z.enum(DURATION_UNITS).optional(),
     handlingDays: z.coerce.number().int().min(0).max(30).optional(), // purono
+    bookingCutoffTime: bookingCutoffField.optional(),
+    blockedBookingDates: z.array(blockedDateField).max(366).optional(),
   })
   .superRefine((d, ctx) => {
     const needsLocal = d.deliveryType === "LOCAL" || d.deliveryType === "BOTH";
