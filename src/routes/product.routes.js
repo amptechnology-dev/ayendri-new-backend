@@ -19,7 +19,8 @@ const {
   getProductPickupAddress,
   getBookingAvailability,
   sendProductOtp,
-  verifyProducts
+  verifyProducts,
+  getProductForEdit
 } = require("../controller/product.controller.js");
 
 // ---------- STORE (authenticated) ----------
@@ -45,7 +46,12 @@ router.get(
   authorize("STORE"),
   allProductWithStore,
 );
-router.delete("/delete-product/:id", verifyJwt, authorize("STORE"), deleteProduct);
+router.delete(
+  "/delete-product/:id",
+  verifyJwt,
+  authorize("STORE"),
+  deleteProduct,
+);
 router.patch("/verify-status/:id", verifyJwt, authorize("STORE"), verifyStatus);
 
 // ---------- STOREFRONT (public, by storeUniqueId) ----------
@@ -69,5 +75,11 @@ router.get(
 );
 router.post("/send-otp", verifyJwt, authorize("STORE"), sendProductOtp);
 router.post("/verify-products", verifyJwt, authorize("STORE"), verifyProducts);
+router.get(
+  "/edit-product/:id",
+  verifyJwt,
+  authorize("STORE"),
+  getProductForEdit,
+);
 
 module.exports = router;

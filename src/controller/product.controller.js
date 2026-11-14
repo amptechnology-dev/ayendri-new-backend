@@ -650,8 +650,14 @@ const getAllProducts = async (req, res) => {
       userId: new mongoose.Types.ObjectId(userId),
     };
 
+    const showUnverified = req.query.verified === "false";
+
     if (req.query.verified === "true") matchStage.isVerified = true;
-    if (req.query.verified === "false") matchStage.isVerified = false;
+    if (showUnverified) {
+      matchStage.$and = [
+        { $or: [{ isVerified: false }, { hasPendingUpdate: true }] },
+      ];
+    }
 
     if (search) {
       matchStage.$or = [
@@ -663,6 +669,20 @@ const getAllProducts = async (req, res) => {
     const pipeline = [
       { $match: matchStage },
 
+      ...(showUnverified
+        ? [
+            {
+              $replaceRoot: {
+                newRoot: {
+                  $mergeObjects: [
+                    "$$ROOT",
+                    { $ifNull: ["$pendingUpdate.updateData", {}] },
+                  ],
+                },
+              },
+            },
+          ]
+        : []),
       {
         $lookup: {
           from: "stores",
@@ -717,6 +737,7 @@ const getAllProducts = async (req, res) => {
           deliveryTime: 1,
           isActive: 1,
           isVerified: 1,
+          hasPendingUpdate: 1,
           pickupAddress: 1,
           storeId: 1,
           categoryId: 1,
@@ -788,9 +809,186 @@ const applyOpeningStockDelta = (
   };
 };
 
+const resolveStockForApply = (product, data, stockManaged, meta) => {
+  if (!stockManaged) {
+    stripStockFields(data);
+    return;
+  }
+
+  if (!data.hasVariants) {
+    if (meta.openingStock !== undefined && meta.openingStock !== null) {
+      Object.assign(
+        data,
+        applyOpeningStockDelta(
+          product.openingStock,
+          product.currentStock,
+          meta.openingStock,
+        ),
+      );
+    } else {
+      data.openingStock = product.openingStock;
+      data.currentStock = product.currentStock;
+    }
+    return;
+  }
+
+  const existingFlat = [];
+  (product.variants || []).forEach((v) => {
+    if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
+      v.sizeVariants.forEach((sv) => existingFlat.push(sv));
+    } else {
+      existingFlat.push(v);
+    }
+  });
+
+  let flatIdx = 0;
+  const applyToVariant = (variant) => {
+    const prev = existingFlat[flatIdx];
+    flatIdx += 1;
+    if (prev && variant.openingStock !== undefined) {
+      Object.assign(
+        variant,
+        applyOpeningStockDelta(
+          prev.openingStock,
+          prev.currentStock,
+          variant.openingStock,
+        ),
+      );
+    } else if (prev) {
+      variant.openingStock = prev.openingStock;
+      variant.currentStock = prev.currentStock;
+    }
+  };
+
+  (data.variants || []).forEach((v) => {
+    if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
+      v.sizeVariants.forEach(applyToVariant);
+    } else {
+      applyToVariant(v);
+    }
+  });
+};
+
+// [PENDING] payload ta product e asholei apply kore.
+//  - verify korar somoy (markVerified = true)
+//  - ekhono unverified product edit korle direct (markVerified = false)
+const applyProductUpdate = async (
+  product,
+  payload,
+  userId,
+  { markVerified = false } = {},
+) => {
+  const {
+    updateData = {},
+    unsetFields = {},
+    meta = {},
+    pickupMailAddress = null,
+  } = payload;
+
+  const data = { ...updateData };
+  const stockManaged = isStockManaged(product);
+
+  // verify porjonto onno product ei name nite pare, tai abar check
+  if (data.name) {
+    const duplicate = await ProductModel.findOne({
+      name: {
+        $regex: `^${escapeRegex(String(data.name).trim())}$`,
+        $options: "i",
+      },
+      storeId: product.storeId,
+      _id: { $ne: product._id },
+    }).select("_id");
+    if (duplicate) {
+      throw Object.assign(new Error("Product name already exists"), {
+        statusCode: 400,
+      });
+    }
+  }
+
+  // sudhu notun color image add hoyechilo
+  if (meta.colorImageMap) {
+    data.variants = (product.variants || []).map((v, idx) => {
+      const obj = v.toObject ? v.toObject() : v;
+      return {
+        ...obj,
+        images: [...(obj.images || []), ...(meta.colorImageMap[idx] || [])],
+      };
+    });
+  }
+
+  // [STOCK] ekhon (verify er somoy) current stock er opor delta
+  if (meta.isStructural) {
+    resolveStockForApply(product, data, stockManaged, meta);
+    data.hasLowStock = stockManaged
+      ? computeLowStock({ ...product.toObject(), ...data }).hasLowStock
+      : false;
+  }
+
+  const $set = { ...data, hasPendingUpdate: false };
+  if (markVerified) $set.isVerified = true;
+
+  const updatedProduct = await ProductModel.findByIdAndUpdate(
+    product._id,
+    { $set, $unset: { ...unsetFields, pendingUpdate: "" } },
+    { new: true, runValidators: true },
+  );
+
+  if (pickupMailAddress?.email) {
+    mailPickupContact({
+      product: updatedProduct,
+      address: pickupMailAddress,
+      isUpdate: true,
+    }).catch((e) => console.error("Pickup product mail error:", e.message));
+  }
+
+  if (meta.isStructural && stockManaged) {
+    const beforeUnits = flattenStockUnits(product);
+    const afterUnits = flattenStockUnits(updatedProduct);
+
+    await Promise.all(
+      afterUnits
+        .map((unit, idx) => {
+          const before = beforeUnits[idx];
+          if (!before || before.currentStock === unit.currentStock) return null;
+          return logStockChange({
+            productId: updatedProduct._id,
+            storeId: updatedProduct.storeId,
+            userId,
+            variantId: unit.variantId,
+            sizeVariantId: unit.sizeVariantId,
+            productName: updatedProduct.name,
+            variantLabel: unit.label,
+            type: unit.currentStock > before.currentStock ? "IN" : "OUT",
+            reason: "PRODUCT_UPDATE",
+            previousStock: before.currentStock,
+            newStock: unit.currentStock,
+          });
+        })
+        .filter(Boolean),
+    );
+
+    if (updatedProduct.hasLowStock && !product.hasLowStock) {
+      const { lowUnits } = computeLowStock(updatedProduct);
+      await notifyLowStock({
+        product: updatedProduct,
+        lowUnits,
+        userId,
+        storeId: updatedProduct.storeId,
+      });
+    }
+  }
+
+  return updatedProduct;
+};
+
 const updateProduct = async (req, res) => {
   try {
     const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
     const userId = req.user?._id || req.user?.id;
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
@@ -815,22 +1013,7 @@ const updateProduct = async (req, res) => {
         .json({ success: false, message: "Product not found" });
     }
 
-    // [OTP] update korte hole OTP lagbe
-    const updateOtp = await verifyPhoneOtpCode(
-      user.phone,
-      PRODUCT_OTP_PURPOSE,
-      String(req.body.otp || "").trim(),
-    );
-    if (!updateOtp.ok) {
-      return res.status(updateOtp.status || 400).json({
-        success: false,
-        message: updateOtp.message || "Invalid OTP",
-        errors: [{ field: "otp", message: updateOtp.message || "Invalid OTP" }],
-      });
-    }
-
-    // [STOCK] ei product e stock management on kina (product er nijer snapshot flag)
-    const stockManaged = isStockManaged(existingProduct);
+    // [OTP REMOVED] update e ar OTP lage na. OTP lagbe verify korar somoy
 
     const body = { ...req.body };
     if (typeof body.variants === "string") {
@@ -851,12 +1034,10 @@ const updateProduct = async (req, res) => {
           .json({ success: false, message: "Invalid packagingDetails format" });
       }
     }
-    // [TIER]
     const tierParseError = parseJsonField(body, "priceTiers");
     if (tierParseError) {
       return res.status(400).json({ success: false, message: tierParseError });
     }
-    // [GST] zod parse er age gst string -> object
     const gstParseError = parseGstField(body);
     if (gstParseError) {
       return res.status(400).json({ success: false, message: gstParseError });
@@ -864,10 +1045,9 @@ const updateProduct = async (req, res) => {
 
     const parsedData = updateProductSchema.parse(body);
 
-    // [QUOTE] offer price dile MRP lagbe. MRP khali + offer khali = "price on request"
     if (findOfferWithoutMrp(body)) return offerWithoutMrpResponse(res);
 
-    // sudhu name change hole, ar SAME STORE-er moddhe duplicate check
+    // name change hole SAME STORE e duplicate check
     if (parsedData.name) {
       const trimmedName = parsedData.name.trim();
       const nameChanged =
@@ -890,8 +1070,7 @@ const updateProduct = async (req, res) => {
       }
     }
 
-    // [CAT TYPE] category type shobshomoy product type er sathe mile jete hobe
-    // (sudhu type change holeo existing category ta abar check hobe)
+    // [CAT TYPE]
     const targetType =
       parsedData.productType || existingProduct.productType || "PRODUCT";
     const typeChanged =
@@ -924,12 +1103,15 @@ const updateProduct = async (req, res) => {
     const finalMainImages = [...existingMainImages, ...newMainImages];
 
     let updateData = { ...parsedData, images: finalMainImages };
-
-    // [GST] product-level GST khali kore dile purono GST muchte $unset lagbe
-    // ($set e undefined dile mongoose seta bad dey, tai purono value theke jay)
     const unsetFields = {};
 
-    // variants/pricing/stock/tier somporkito kono field ashle notun kore structure decide hobe
+    // [PENDING] verify er somoy stock hishab korar jonno raw value rakhi
+    const meta = {
+      isStructural: false,
+      openingStock: body.openingStock,
+      colorImageMap: null,
+    };
+
     const isStructuralUpdate =
       body.variants !== undefined ||
       body.mrp !== undefined ||
@@ -948,7 +1130,6 @@ const updateProduct = async (req, res) => {
           .json({ success: false, message: "Validation failed", errors });
       }
 
-      // [TIER] quantity based price tiers validate + attach
       const tierError = applyPriceTiers(body, data, hasVariants);
       if (tierError) {
         return res.status(400).json({
@@ -957,10 +1138,8 @@ const updateProduct = async (req, res) => {
           errors: [{ field: "priceTiers", message: tierError }],
         });
       }
-      // [TIER] tier gulo shobshomoy data te thakbe (empty hole purono tier muche jabe)
       syncTiers(data, body, hasVariants);
 
-      // [GST] product / color / size level GST + gstInclusive validate + attach
       const gstError = applyGst(body, data, hasVariants);
       if (gstError) {
         return res.status(400).json({
@@ -984,67 +1163,7 @@ const updateProduct = async (req, res) => {
         }));
       }
 
-      // ---------- Stock ----------
-      if (!stockManaged) {
-        // [STOCK] stock management off: main product + variant + sizeVariant e stock 0,
-        // frontend theke ja-i ashuk stock field save hobe na
-        stripStockFields(data);
-      } else if (!hasVariants) {
-        // simple product
-        if (body.openingStock !== undefined) {
-          Object.assign(
-            data,
-            applyOpeningStockDelta(
-              existingProduct.openingStock,
-              existingProduct.currentStock,
-              body.openingStock,
-            ),
-          );
-        } else {
-          // openingStock notun kore deyni -> purono stock retain
-          data.openingStock = existingProduct.openingStock;
-          data.currentStock = existingProduct.currentStock;
-        }
-      } else {
-        // variant/color level e - proti variant-er jonno existing match kore delta lagano
-        const existingFlat = [];
-        (existingProduct.variants || []).forEach((v) => {
-          if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
-            v.sizeVariants.forEach((sv) => existingFlat.push(sv));
-          } else {
-            existingFlat.push(v);
-          }
-        });
-
-        let flatIdx = 0;
-        const applyToVariant = (variant) => {
-          const prev = existingFlat[flatIdx];
-          flatIdx += 1;
-          if (prev && variant.openingStock !== undefined) {
-            Object.assign(
-              variant,
-              applyOpeningStockDelta(
-                prev.openingStock,
-                prev.currentStock,
-                variant.openingStock,
-              ),
-            );
-          } else if (prev) {
-            variant.openingStock = prev.openingStock;
-            variant.currentStock = prev.currentStock;
-          }
-        };
-
-        data.variants.forEach((v) => {
-          if (Array.isArray(v.sizeVariants) && v.sizeVariants.length) {
-            v.sizeVariants.forEach(applyToVariant);
-          } else {
-            applyToVariant(v);
-          }
-        });
-      }
-
-      // [QUOTE] data te mrp / offerPrice null thakle (price on request) purono price muche jabe
+      // [PENDING] stock + hasLowStock ekhane hishab hoy na, applyProductUpdate e hoy
       updateData = {
         ...updateData,
         ...data,
@@ -1053,40 +1172,20 @@ const updateProduct = async (req, res) => {
         hasColor,
       };
 
-      // [GST] product-level gst khali hole $set theke bad diye $unset koro
       if (!data.gst) {
         delete updateData.gst;
         unsetFields.gst = "";
       }
-
-      // [HSN] GST na thakle purono HSN muchte $unset (undefined $set e purono value theke jay)
       if (!data.hsnCode) {
         delete updateData.hsnCode;
         unsetFields.hsnCode = "";
       }
 
-      // [STOCK] low stock flag shudhu stock managed product er jonno
-      if (stockManaged) {
-        const tempForFlagCheck = {
-          ...existingProduct.toObject(),
-          ...updateData,
-        };
-        updateData.hasLowStock = computeLowStock(tempForFlagCheck).hasLowStock;
-      } else {
-        updateData.hasLowStock = false;
-      }
+      meta.isStructural = true;
     } else if (existingProduct.hasColor && req.files?.length) {
-      // sudhu notun color-image add hocche, pricing/stock change hocche na
+      // sudhu notun color image. Existing variants verify er somoy merge hobe
       const colorImageMap = await uploadVariantImages(req.files);
-      if (Object.keys(colorImageMap).length) {
-        updateData.variants = (existingProduct.variants || []).map((v, idx) => {
-          const obj = v.toObject ? v.toObject() : v;
-          return {
-            ...obj,
-            images: [...(obj.images || []), ...(colorImageMap[idx] || [])],
-          };
-        });
-      }
+      if (Object.keys(colorImageMap).length) meta.colorImageMap = colorImageMap;
     }
 
     const policyResult = parseProductPolicy(body, {
@@ -1100,7 +1199,6 @@ const updateProduct = async (req, res) => {
     const pickupEmailErr = pickupEmailError(pickup.address);
     if (pickupEmailErr) return pickupErrorResponse(res, pickupEmailErr);
 
-    // [PICKUP] ekhon PRODUCT ar SERVICE duitar-i pickup address thakte pare
     let pickupMailAddress = null;
     if (pickup.clear) {
       delete updateData.pickupAddress;
@@ -1119,7 +1217,6 @@ const updateProduct = async (req, res) => {
       updateData.productType || existingProduct.productType || "PRODUCT";
     if (finalType === "SERVICE") updateData.fastestDelivery = false;
 
-    // [BOOKING LIMIT] SERVICE hole limit update, PRODUCT hole muche dao
     if (finalType === "SERVICE") {
       if (body.dailyBookingLimit !== undefined) {
         const bl = parseBookingLimit(body.dailyBookingLimit);
@@ -1130,73 +1227,53 @@ const updateProduct = async (req, res) => {
       updateData.dailyBookingLimit = null;
     }
 
-    // [STOCK] hasStockManagement snapshot create er por kokhono change hobe na
     delete updateData.hasStockManagement;
-    // [STORE TYPE] made-for-product flag o create er por change hobe na
     delete updateData.isMadeForProduct;
 
-    const updatedProduct = await ProductModel.findByIdAndUpdate(
-      id,
-      {
-        $set: updateData,
-        // [GST]
-        ...(Object.keys(unsetFields).length ? { $unset: unsetFields } : {}),
-      },
-      { new: true, runValidators: true },
+    // Mixed e rakhle string thakbe, lookup (aggregate) e match korar jonno ObjectId kore nilam
+    if (updateData.categoryId) {
+      updateData.categoryId = new mongoose.Types.ObjectId(
+        String(updateData.categoryId),
+      );
+    }
+
+    const payload = {
+      updateData,
+      unsetFields,
+      meta,
+      pickupMailAddress,
+      submittedAt: new Date(),
+    };
+
+    // ---- ekhono verify-i hoyni: direct update (already public noy) ----
+    if (!existingProduct.isVerified) {
+      const updated = await applyProductUpdate(
+        existingProduct,
+        payload,
+        userId,
+        {
+          markVerified: false,
+        },
+      );
+      return res.status(200).json({
+        success: true,
+        pending: false,
+        message: "Product updated. Verify it with OTP to publish it.",
+        data: updated,
+      });
+    }
+
+    // ---- verified product: live data na chuye pending e rakho ----
+    await ProductModel.updateOne(
+      { _id: id },
+      { $set: { pendingUpdate: payload, hasPendingUpdate: true } },
     );
-
-    await clearPhoneOtp(user.phone, PRODUCT_OTP_PURPOSE);
-
-    if (pickupMailAddress?.email) {
-      mailPickupContact({
-        product: updatedProduct,
-        address: pickupMailAddress,
-        isUpdate: true,
-      }).catch((e) => console.error("Pickup product mail error:", e.message));
-    }
-
-    // ---------- log stock deltas + notify if newly low ----------
-    // [STOCK] shudhu stock managed product er jonno
-    if (isStructuralUpdate && stockManaged) {
-      const beforeUnits = flattenStockUnits(existingProduct);
-      const afterUnits = flattenStockUnits(updatedProduct);
-
-      const logPromises = afterUnits
-        .map((unit, idx) => {
-          const before = beforeUnits[idx];
-          if (!before || before.currentStock === unit.currentStock) return null;
-          return logStockChange({
-            productId: updatedProduct._id,
-            storeId: updatedProduct.storeId,
-            userId,
-            variantId: unit.variantId,
-            sizeVariantId: unit.sizeVariantId,
-            productName: updatedProduct.name,
-            variantLabel: unit.label,
-            type: unit.currentStock > before.currentStock ? "IN" : "OUT",
-            reason: "PRODUCT_UPDATE",
-            previousStock: before.currentStock,
-            newStock: unit.currentStock,
-          });
-        })
-        .filter(Boolean);
-      await Promise.all(logPromises);
-
-      if (updatedProduct.hasLowStock && !existingProduct.hasLowStock) {
-        const { lowUnits } = computeLowStock(updatedProduct);
-        await notifyLowStock({
-          product: updatedProduct,
-          lowUnits,
-          userId,
-          storeId: updatedProduct.storeId,
-        });
-      }
-    }
 
     return res.status(200).json({
       success: true,
-      message: "Product updated successfully",
-      data: updatedProduct,
+      pending: true,
+      message:
+        "Changes saved. Verify the product with OTP from Unverified Products to make them live.",
     });
   } catch (error) {
     console.log(error);
@@ -1219,7 +1296,6 @@ const updateProduct = async (req, res) => {
         .status(400)
         .json({ success: false, message: "Validation failed", errors });
     }
-    // uploadPreparedFile er statusCode error (video convert fail etc.)
     if (error.statusCode) {
       return res
         .status(error.statusCode)
@@ -1298,16 +1374,25 @@ const getProductPickupAddress = async (req, res) => {
     }
     const userId = req.user?._id || req.user?.id;
     const product = await ProductModel.findOne({ _id: id, userId })
-      .select("pickupAddress")
+      .select("pickupAddress +pendingUpdate")
       .lean();
     if (!product) {
       return res
         .status(404)
         .json({ success: false, message: "Product not found" });
     }
-    return res
-      .status(200)
-      .json({ success: true, pickupAddress: product.pickupAddress || null });
+
+    let pickupAddress = product.pickupAddress || null;
+    const pending = product.pendingUpdate;
+    if (pending) {
+      if (pending.unsetFields?.pickupAddress !== undefined) {
+        pickupAddress = null;
+      } else if (pending.updateData?.pickupAddress) {
+        pickupAddress = pending.updateData.pickupAddress;
+      }
+    }
+
+    return res.status(200).json({ success: true, pickupAddress });
   } catch (error) {
     console.error("Get Pickup Address Error:", error);
     return res
@@ -2283,7 +2368,6 @@ const sendProductOtp = async (req, res) => {
   }
 };
 
-// POST /api/product/verify-products   body: { productIds: string[], otp }
 const verifyProducts = async (req, res) => {
   try {
     const userId = req.user?._id || req.user?.id;
@@ -2315,7 +2399,6 @@ const verifyProducts = async (req, res) => {
         .json({ success: false, message: "OTP is required" });
     }
 
-    // [OTP] shobar age OTP check
     const check = await verifyPhoneOtpCode(
       user.phone,
       PRODUCT_OTP_PURPOSE,
@@ -2327,15 +2410,12 @@ const verifyProducts = async (req, res) => {
         .json({ success: false, message: check.message || "Invalid OTP" });
     }
 
-    // [SECURITY] shudhu nijer + ekhono unverified product
-    const filter = {
+    // [SECURITY] nijer product: notun unverified + pending update thaka
+    const products = await ProductModel.find({
       _id: { $in: productIds },
       userId,
-      isVerified: false,
-    };
-    const products = await ProductModel.find(filter)
-      .select("name storeId")
-      .lean();
+      $or: [{ isVerified: false }, { hasPendingUpdate: true }],
+    }).select("+pendingUpdate");
 
     if (!products.length) {
       return res.status(404).json({
@@ -2344,23 +2424,46 @@ const verifyProducts = async (req, res) => {
       });
     }
 
-    await ProductModel.updateMany(
-      { _id: { $in: products.map((p) => p._id) }, userId },
-      { $set: { isVerified: true } },
-    );
+    const done = []; // {name, storeId} email er jonno
+    const plainIds = []; // pending chhilo na, shudhu isVerified true hobe
+    const failed = [];
+
+    for (const p of products) {
+      if (p.hasPendingUpdate && p.pendingUpdate) {
+        try {
+          const updated = await applyProductUpdate(p, p.pendingUpdate, userId, {
+            markVerified: true,
+          });
+          done.push({ name: updated.name, storeId: updated.storeId });
+        } catch (e) {
+          console.error("Apply pending update error:", p._id, e.message);
+          failed.push({ _id: p._id, name: p.name, message: e.message });
+        }
+      } else {
+        plainIds.push(p._id);
+        done.push({ name: p.name, storeId: p.storeId });
+      }
+    }
+
+    if (plainIds.length) {
+      await ProductModel.updateMany(
+        { _id: { $in: plainIds }, userId },
+        { $set: { isVerified: true } },
+      );
+    }
     await clearPhoneOtp(user.phone, PRODUCT_OTP_PURPOSE);
 
-    // verify email (fire-and-forget, fail korle verify block hobe na)
+    // verify email (fire-and-forget)
     (async () => {
       try {
-        if (!user.email) return;
+        if (!user.email || !done.length) return;
         const stores = await StoreModel.find({
-          _id: { $in: [...new Set(products.map((p) => String(p.storeId)))] },
+          _id: { $in: [...new Set(done.map((p) => String(p.storeId)))] },
         })
           .select("storeName storeUniqueId")
           .lean();
         const storeMap = new Map(stores.map((s) => [String(s._id), s]));
-        for (const p of products) {
+        for (const p of done) {
           const s = storeMap.get(String(p.storeId));
           if (!s) continue;
           await sendProductVerifyEmail(
@@ -2377,13 +2480,65 @@ const verifyProducts = async (req, res) => {
       }
     })();
 
+    if (!done.length) {
+      return res.status(400).json({
+        success: false,
+        message: failed[0]?.message || "Verification failed",
+        failed,
+      });
+    }
+
     return res.status(200).json({
       success: true,
-      message: `${products.length} product${products.length > 1 ? "s" : ""} verified successfully`,
-      verifiedCount: products.length,
+      message: `${done.length} product${done.length > 1 ? "s" : ""} verified successfully${
+        failed.length ? `, ${failed.length} failed` : ""
+      }`,
+      verifiedCount: done.length,
+      failed,
     });
   } catch (error) {
     console.error("Verify products error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error" });
+  }
+};
+
+const getProductForEdit = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid product id" });
+    }
+    const userId = req.user?._id || req.user?.id;
+
+    const doc = await ProductModel.findOne({ _id: id, userId })
+      .select("-pickupAddress -reviews +pendingUpdate")
+      .lean();
+    if (!doc) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Product not found" });
+    }
+
+    const { pendingUpdate, ...live } = doc;
+    let product = live;
+    if (pendingUpdate?.updateData) {
+      product = { ...live, ...pendingUpdate.updateData };
+      Object.keys(pendingUpdate.unsetFields || {}).forEach((k) => {
+        delete product[k];
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      hasPendingUpdate: !!pendingUpdate,
+      product,
+    });
+  } catch (error) {
+    console.error("Get Product For Edit Error:", error);
     return res
       .status(500)
       .json({ success: false, message: "Internal server error" });
@@ -2406,4 +2561,5 @@ module.exports = {
   getBookingAvailability,
   sendProductOtp,
   verifyProducts,
+  getProductForEdit,
 };

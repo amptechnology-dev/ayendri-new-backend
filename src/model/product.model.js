@@ -209,6 +209,12 @@ const productSchema = new mongoose.Schema(
     hsnCode: { type: String, trim: true },
     isActive: { type: Boolean, default: true },
     isVerified: { type: Boolean, default: false },
+    pendingUpdate: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+      select: false,
+    },
+    hasPendingUpdate: { type: Boolean, default: false, index: true },
     storeId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Store",
